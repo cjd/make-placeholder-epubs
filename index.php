@@ -1,0 +1,1302 @@
+<?php
+// PHP Configuration
+// The script handles both the front-end HTML/JS (GET request) 
+// and the back-end processing logic (POST request via AJAX).
+
+// --- Debug Logging Functionality ---
+
+// Define the log file paths
+define('DEBUG_LOG_FILE', 'debug.log');
+define('EPUB_DIR', 'epubs/'); 
+define('ISBN_LIST_FILE', 'processed_isbns.txt');
+
+// --- API Configuration ---
+// Hardcover API requires a Bearer token for authorized requests
+// NOTE: This token is only used for cover image lookups based on title/author.
+
+// Load environment variables from .env file
+if (file_exists(__DIR__ . '/.env')) {
+    $lines = file(__DIR__ . '/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos(trim($line), '#') === 0) continue;
+        list($name, $value) = explode('=', $line, 2);
+        $name = trim($name);
+        $value = trim($value);
+        if ($name === 'HARDCOVER_BEARER_TOKEN') {
+            define('HARDCOVER_BEARER_TOKEN', $value);
+        }
+    }
+}
+
+// Fallback if not defined in .env
+if (!defined('HARDCOVER_BEARER_TOKEN')) {
+    define('HARDCOVER_BEARER_TOKEN', ''); // Define as empty if not found
+}
+
+define('HARDCOVER_GRAPHQL_ENDPOINT', 'https://api.hardcover.app/v1/graphql');
+
+
+// --- Utility Functions ---
+
+// Utility function for logging messages
+function log_message($message, $type = 'INFO') {
+    $timestamp = date('Y-m-d H:i:s');
+    $log_entry = "[$timestamp] [$type] $message\n";
+    file_put_contents(DEBUG_LOG_FILE, $log_entry, FILE_APPEND);
+}
+
+// Utility function to record successful ISBN processing
+function record_processed_isbn($isbn, $title = 'Unknown') {
+    $timestamp = date('Y-m-d H:i:s');
+    $entry = "[$timestamp] ISBN: $isbn, Title: $title\n";
+    file_put_contents(ISBN_LIST_FILE, $entry, FILE_APPEND);
+}
+
+/**
+ * Sanitizes a string for use in a filename (alphanumeric and hyphen only).
+ * @param string $string The input string (title, author, or ISBN).
+ * @return string The sanitized string.
+ */
+function sanitize_filename_part($string) {
+    $string = preg_replace('/[^a-zA-Z0-9\s-]/', '', $string);
+    $string = preg_replace('/[\s-]+/', '-', $string);
+    $string = trim($string, '-');
+    return strtolower($string);
+}
+
+/**
+ * Executes a cURL request to a given URL and returns the response body.
+ */
+function fetch_url($url, $headers = [], $post_fields = null) {
+    log_message("Fetching URL: $url" . ($post_fields ? " (POST)" : ""));
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+    
+    if ($post_fields) {
+        curl_setopt($ch, CURLOPT_POST, 1);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $post_fields);
+    }
+    
+    if (!empty($headers)) {
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    }
+    
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5); 
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15); // Increased timeout for external APIs
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false || $http_code >= 400 || !empty($error)) {
+        log_message("cURL Error for $url: HTTP $http_code, Error: $error", 'ERROR');
+        return null;
+    }
+    
+    log_message("Successfully fetched URL, HTTP code: $http_code");
+    return $response;
+}
+
+
+// --- Metadata Retrieval Functions (Hardcover - Priority Source) ---
+
+function get_hardcover_metadata($identifier) {
+    log_message("Attempting to get metadata from Hardcover for $identifier");
+    
+    // GraphQL Query structure for finding a book by ISBN or by title/author (Manual Search)
+    $query = '
+        query GetBookDetails($identifier: String!) {
+            search(query: $identifier, query_type: "books") {
+                results
+            }
+        }
+    ';
+
+    $variables = [
+        'identifier' => $identifier,
+    ];
+
+    $payload = json_encode([
+        'query' => $query,
+        'variables' => $variables
+    ]);
+
+    $headers = [
+        'Content-Type: application/json',
+        'Authorization: ' . HARDCOVER_BEARER_TOKEN
+    ];
+
+    $data = fetch_url(HARDCOVER_GRAPHQL_ENDPOINT, $headers, $payload);
+
+    if ($data) {
+        $json = json_decode($data, true);
+        
+        // Check for GraphQL errors
+        if (isset($json['errors'])) {
+            log_message("Hardcover GraphQL Error: " . print_r($json['errors'], true), 'WARNING');
+            return null;
+        }
+
+        $book_data = $json['data']['search']['results']['hits'][0]['document'] ?? null;
+        
+        if ($json['data']['search']['results']['found'] > 0) {
+            log_message("Hardcover success: Found book titled '{$book_data['title']}'");
+            return [
+                'title' => $book_data['title'] ?? 'Unknown Title',
+                'author' => implode(' & ', $book_data['author_names'] ?? ['Unknown Author']),
+                'description' => $book_data['description'] ?? '',
+                'publisher' => $book_data['publisher'] ?? '',
+                'publishedDate' => $book_data['release_date'] ?? '',
+                'cover_url' => $book_data['image']['url'] ?? null,
+            ];
+        } else {
+            log_message("Hardcover API: Book not found.", 'WARNING');
+        }
+    }
+    return null;
+}
+
+// --- Metadata Retrieval Functions (Google Books) ---
+
+function get_google_books_metadata($isbn) {
+    log_message("Attempting to get metadata from Google Books for ISBN: $isbn");
+    $url = "https://www.googleapis.com/books/v1/volumes?q=isbn:$isbn";
+    $data = fetch_url($url);
+
+    if ($data) {
+        $json = json_decode($data, true);
+        if (isset($json['totalItems']) && $json['totalItems'] > 0) {
+            $item = $json['items'][0]['volumeInfo'];
+            log_message("Google Books success: Found book titled '{$item['title']}'");
+            
+            return [
+                'title' => $item['title'] ?? 'Unknown Title',
+                'author' => implode(' & ', $item['authors'] ?? ['Unknown Author']),
+                'description' => $item['description'] ?? '',
+                'publisher' => $item['publisher'] ?? '',
+                'publishedDate' => $item['publishedDate'] ?? '',
+                'cover_url' => $item['imageLinks']['extraLarge'] ?? $item['imageLinks']['large'] ?? $item['imageLinks']['thumbnail'] ?? null,
+            ];
+        } else {
+            log_message("Google Books API: Book not found.", 'WARNING');
+        }
+    }
+    return null;
+}
+
+// --- Metadata Retrieval Functions (Open Library) ---
+
+function get_open_library_metadata($isbn) {
+    log_message("Attempting to get metadata from Open Library for ISBN: $isbn");
+    $url = "https://openlibrary.org/api/books?bibkeys=ISBN:$isbn&jscmd=data&format=json";
+    $data = fetch_url($url);
+
+    if ($data) {
+        $json = json_decode($data, true);
+        $key = "ISBN:$isbn";
+        
+        if (isset($json[$key])) {
+            $book = $json[$key];
+            $title = $book['title'] ?? 'Unknown Title';
+            $authors = [];
+            if (isset($book['authors'])) {
+                foreach ($book['authors'] as $author) {
+                    $authors[] = $author['name'];
+                }
+            }
+            
+            $cover_url = null;
+            if (isset($book['cover']['large'])) {
+                 $cover_url = $book['cover']['large'];
+            } elseif (isset($book['cover']['medium'])) {
+                 $cover_url = $book['cover']['medium'];
+            }
+
+            log_message("Open Library success: Found book titled '$title'");
+            return [
+                'title' => $title,
+                'author' => implode(' & ', $authors) ?: 'Unknown Author',
+                'description' => $book['excerpts'][0]['text'] ?? $book['subtitle'] ?? '', 
+                'publisher' => $book['publishers'][0]['name'] ?? '',
+                'publishedDate' => $book['publish_date'] ?? '',
+                'cover_url' => $cover_url,
+            ];
+        } else {
+            log_message("Open Library API: Book not found.", 'WARNING');
+        }
+    }
+    return null;
+}
+
+/**
+ * Consolidates metadata from Hardcover, Google Books, and Open Library.
+ */
+function get_book_metadata($identifier, $type = 'ISBN') {
+    // Determine which API to call based on the search type
+    if ($type === 'TITLE_AUTHOR') {
+        // Manual search only uses Hardcover, as Google/OL require ISBN
+        $hardcover_data = get_hardcover_metadata($identifier);
+        $metadata = $hardcover_data ?: null;
+        if ($metadata) {
+            $metadata['isbn'] = $metadata['isbn'] ?? 'N/A';
+        }
+    } else { // ISBN search
+        $hardcover_data = get_hardcover_metadata($identifier);
+        $google_data = get_google_books_metadata($identifier);
+        $open_library_data = get_open_library_metadata($identifier);
+
+        $metadata = [
+            'isbn' => $identifier,
+            'title' => 'Title Not Found',
+            'author' => 'Author Not Found',
+            'description' => 'No description available.',
+            'publisher' => 'Publisher Not Found',
+            'publishedDate' => 'N/A',
+            'cover_url' => null,
+        ];
+
+        $sources = array_filter([$hardcover_data, $google_data, $open_library_data]);
+
+        // Prioritized consolidation: Hardcover > Google > Open Library
+        foreach ($sources as $source) {
+            // Overwrite if the current value is a placeholder or if the new value is better
+            foreach ($source as $key => $value) {
+                if ($value && ($metadata[$key] === "Title Not Found" || 
+                               $metadata[$key] === "Author Not Found" || 
+                               $metadata[$key] === "No description available." ||
+                               $metadata[$key] === "Publisher Not Found" ||
+                               $metadata[$key] === "N/A" || 
+                               ($key === 'cover_url' && !$metadata['cover_url']) ||
+                               ($key !== 'description' && $value !== ''))) {
+                    $metadata[$key] = $value;
+                }
+            }
+        }
+        
+        // Final cover check
+        if ($google_data && isset($google_data['cover_url']) && $google_data['cover_url']) {
+            $metadata['cover_url'] = $google_data['cover_url'];
+        } elseif ($open_library_data && isset($open_library_data['cover_url']) && $open_library_data['cover_url']) {
+            $metadata['cover_url'] = $open_library_data['cover_url'];
+        } elseif ($hardcover_data && isset($hardcover_data['cover_url']) && $hardcover_data['cover_url']) {
+            $metadata['cover_url'] = $hardcover_data['cover_url'];
+        }
+    }
+
+    log_message("Final Consolidated Metadata: " . print_r($metadata, true));
+    return $metadata;
+}
+
+// --- EPUB File Generation Functions ---
+
+function create_opf_content($metadata, $cover_mime = 'image/jpeg') { 
+    $date = date('Y-m-d\TH:i:s\Z');
+    $uuid = 'urn:uuid:' . uniqid();
+    $is_placeholder_cover = (isset($metadata['cover_url']) && $metadata['cover_url'] === 'placeholder');
+    // HARDCODED COVER FILENAME AND MIME TYPE
+    $cover_filename = 'cover.jpeg';
+    $cover_mime = 'image/jpeg';
+    $modified_date = substr($metadata['publishedDate'], 0, 10) ?: '2024-01-01';
+
+    $title = htmlspecialchars($metadata['title'], ENT_XML1, 'UTF-8');
+    $author = htmlspecialchars($metadata['author'], ENT_XML1, 'UTF-8');
+    $isbn = htmlspecialchars($metadata['isbn'], ENT_XML1, 'UTF-8');
+    $publisher = htmlspecialchars($metadata['publisher'], ENT_XML1, 'UTF-8');
+    $description = htmlspecialchars($metadata['description'], ENT_XML1, 'UTF-8');
+    
+    $primary_author = $metadata['author'];
+    if (strpos($primary_author, ' & ') !== false) {
+        $primary_author = trim(explode(' & ', $primary_author)[0]);
+    }
+    $author_parts = explode(' ', $primary_author);
+    if (count($author_parts) > 1) {
+        $file_as_author = end($author_parts) . ', ' . implode(' ', array_slice($author_parts, 0, -1));
+    } else {
+        $file_as_author = $primary_author;
+    }
+    $file_as_author = htmlspecialchars($file_as_author, ENT_XML1, 'UTF-8');
+
+    $cover_manifest_item = '';
+    $cover_meta = '';
+    if (!$is_placeholder_cover) {
+        $cover_manifest_item = "<item id=\"cover-image\" href=\"{$cover_filename}\" media-type=\"{$cover_mime}\" properties=\"cover-image\"/>";
+        $cover_meta = '<meta name="cover" content="cover-image"/>';
+    }
+
+    return <<<EOT
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:identifier id="BookId">{$uuid}</dc:identifier>
+    <dc:identifier opf:scheme="ISBN">{$isbn}</dc:identifier>
+    <dc:identifier>isbn:{$isbn}</dc:identifier>
+    <dc:title>{$title}</dc:title>
+    <dc:creator id="creator" opf:role="aut" opf:file-as="{$file_as_author}">{$author}</dc:creator>
+    <dc:publisher>{$publisher}</dc:publisher>
+    <dc:language>en</dc:language>
+    <dc:description>{$description}</dc:description>
+    <dc:date opf:event="publication">{$modified_date}</dc:date>
+    <meta property="dcterms:modified">{$date}</meta>
+    {$cover_meta}
+  </metadata>
+  <manifest>
+    {$cover_manifest_item}
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="titlepage" href="titlepage.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="titlepage" linear="yes"/>
+  </spine>
+  <guide>
+    <reference type="cover" title="Cover" href="titlepage.xhtml"/>
+  </guide>
+</package>
+EOT;
+}
+
+function create_titlepage_content($metadata) { 
+    $title = htmlspecialchars($metadata['title'], ENT_XML1, 'UTF-8');
+    $author = htmlspecialchars($metadata['author'], ENT_XML1, 'UTF-8');
+    $description = htmlspecialchars(nl2br($metadata['description']), ENT_XML1, 'UTF-8');
+    
+    $has_cover = isset($metadata['cover_url']) && $metadata['cover_url'] !== 'placeholder';
+    // HARDCODED COVER FILENAME
+    $cover_filename = 'cover.jpeg';
+
+    $cover_html = '';
+    if ($has_cover) {
+        $cover_html = "<img src=\"{$cover_filename}\" alt=\"Cover image for {$title}\" />";
+    } else {
+        $cover_html = "<div class=\"placeholder-cover\"><h2>NO COVER IMAGE AVAILABLE</h2><p>For: {$title}</p></div>";
+    }
+
+    return <<<EOT
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">
+  <head>
+    <title>{$title}</title>
+    <meta charset="utf-8"/>
+    <style>
+      body { margin: 0; padding: 0; text-align: center; font-family: sans-serif; background-color: #f7f7f7; }
+      .cover-container { padding: 5%; }
+      img { max-width: 100%; height: auto; display: block; margin: 0 auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+      .placeholder-cover { 
+        background-color: #ccc; 
+        color: #333; 
+        height: 400px; 
+        text-align: center; 
+        border: 1px dashed #666; 
+        margin: 20px auto; 
+        max-width: 80%; 
+        display: flex; 
+        flex-direction: column; 
+        justify-content: center; 
+        align-items: center; 
+        padding: 20px;
+        box-sizing: border-box;
+      }
+      .placeholder-cover h2 { font-size: 1.5em; margin-bottom: 10px; }
+      .placeholder-cover p { font-size: 1em; }
+      h1 { margin-top: 20px; font-size: 1.5em; }
+      h2 { font-size: 1.1em; color: #555; }
+      .description { margin-top: 30px; text-align: left; padding: 0 5%; font-size: 0.9em; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <div class="cover-container">
+      {$cover_html}
+      <h1>{$title}</h1>
+      <h2>By {$author}</h2>
+      <div class="description">
+        <h3>Description:</h3>
+        <p>{$description}</p>
+        <p>ISBN: {$metadata['isbn']}</p>
+        <p>Publisher: {$metadata['publisher']}</p>
+        <p>Published: {$metadata['publishedDate']}</p>
+      </div>
+    </div>
+  </body>
+</html>
+EOT;
+}
+
+function create_ncx_content($metadata) { 
+    $title = htmlspecialchars($metadata['title'], ENT_XML1, 'UTF-8');
+    return <<<EOT
+<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="en">
+  <head>
+    <meta name="dtb:uid" content="urn:uuid:{$metadata['isbn']}"/>
+    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
+  </head>
+  <docTitle>
+    <text>{$title}</text>
+  </docTitle>
+  <navMap>
+    <navPoint id="navpoint-1" playOrder="1">
+      <navLabel>
+        <text>Title Page</text>
+      </navLabel>
+      <content src="titlepage.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>
+EOT;
+}
+
+/**
+ * Downloads a file, determines its MIME type, and converts image data to JPEG if possible.
+ * @param string $url The URL to download.
+ * @return array|null An array containing 'content' (the file data, guaranteed JPEG if image) and 'mime' (image/jpeg) or null on failure.
+ */
+function download_file($url) { 
+    log_message("Attempting to download file from: $url");
+    $content = fetch_url($url);
+    if (!$content) {
+        log_message("Failed to download file from $url", 'ERROR');
+        return null;
+    }
+    
+    // Determine MIME type
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $mime_type = finfo_buffer($finfo, $content);
+    finfo_close($finfo);
+
+    // Check if it's an image and if GD extension is loaded for conversion
+    if (preg_match('/^image\/(jpe?g|png|gif|webp)$/i', $mime_type) && extension_loaded('gd')) {
+        log_message("Downloaded file is an image ($mime_type). Attempting conversion to JPEG.");
+        
+        $image = false;
+        if ($mime_type === 'image/jpeg' || $mime_type === 'image/jpg') {
+            $image = imagecreatefromstring($content);
+        } elseif ($mime_type === 'image/png') {
+            $image = imagecreatefrompng($content);
+        } elseif ($mime_type === 'image/gif') {
+            $image = imagecreatefromgif($content);
+        } elseif ($mime_type === 'image/webp') {
+             // Check for WebP support
+             if (function_exists('imagecreatefromwebp')) {
+                 $image = imagecreatefromwebp($content);
+             } else {
+                 log_message("GD WebP support is missing. Skipping conversion.", 'WARNING');
+                 // Fallback: If WebP can't be read, try to treat it as-is (might fail EPUB validation)
+                 return ['content' => $content, 'mime' => $mime_type];
+             }
+        }
+
+        if ($image !== false) {
+            // Use output buffering to capture the JPEG data
+            ob_start();
+            // Convert and output to buffer (quality 85)
+            imagejpeg($image, null, 85);
+            $jpeg_content = ob_get_clean();
+            imagedestroy($image);
+            
+            log_message("Image successfully converted to JPEG.");
+            return ['content' => $jpeg_content, 'mime' => 'image/jpeg'];
+        } else {
+            log_message("Could not create image resource for conversion. Using raw content.", 'WARNING');
+        }
+    } else {
+        log_message("Downloaded file is not a supported image format or GD is not available ($mime_type). Using raw content.", 'WARNING');
+    }
+    
+    // Fallback if not an image, GD is missing, or conversion failed
+    return ['content' => $content, 'mime' => $mime_type];
+}
+
+/**
+ * Creates a zip archive (EPUB file) containing the necessary files.
+ * @param array $metadata The book metadata.
+ * @return string|null The filepath to the created EPUB file or null on failure.
+ */
+function create_epub_file($metadata) {
+    if (!is_dir(EPUB_DIR)) {
+        if (!mkdir(EPUB_DIR, 0777, true)) {
+            log_message("Failed to create EPUB directory: " . EPUB_DIR, 'FATAL');
+            return null;
+        }
+        log_message("Created EPUB directory: " . EPUB_DIR);
+    }
+    
+    // Generate the formatted filename: author-title-isbn.epub
+    $isbn_part = sanitize_filename_part($metadata['isbn'] ?? 'no-isbn');
+    $title_part = sanitize_filename_part($metadata['title'] ?? 'untitled');
+    $author_part = sanitize_filename_part($metadata['author'] ?? 'unknown-author');
+    
+    $title_part = substr($title_part, 0, 40);
+    $author_part = substr($author_part, 0, 30);
+
+    $filename_base = "{$author_part}-{$title_part}-{$isbn_part}";
+    $epub_filename = EPUB_DIR . $filename_base . ".epub";
+    
+    log_message("Starting EPUB creation for {$metadata['title']} into $epub_filename (Formatted)");
+
+    // 1. Download Cover Image and convert to JPEG
+    $cover_data = null;
+    // HARDCODE MIME TYPE AND FILENAME
+    $cover_mime = 'image/jpeg';
+    $cover_filename = 'cover.jpeg'; 
+
+    $has_cover_url = isset($metadata['cover_url']) && !empty($metadata['cover_url']);
+
+    if ($has_cover_url) {
+        $cover_download = download_file($metadata['cover_url']);
+        if ($cover_download) {
+            // The download_file function now guarantees conversion to 'image/jpeg' if it's a convertible image.
+            if ($cover_download['mime'] === 'image/jpeg') {
+                $cover_data = $cover_download['content'];
+                log_message("Cover image is available as JPEG: $cover_filename");
+            } else {
+                // If it's not a JPEG (e.g., failed conversion or non-image), treat as no cover
+                log_message("Downloaded file was not a convertible image or GD is missing. Treating as no cover.", 'WARNING');
+            }
+        }
+    }
+
+    if (!$cover_data) {
+        log_message("No valid cover image found or downloaded/converted. Using placeholder metadata flag.", 'WARNING');
+        $metadata['cover_url'] = 'placeholder'; 
+    }
+
+
+    // 2. Generate EPUB component files
+    // Pass the hardcoded MIME type
+    $opf_content = create_opf_content($metadata, $cover_mime); 
+    $titlepage_content = create_titlepage_content($metadata);
+    $ncx_content = create_ncx_content($metadata);
+
+    // 3. Prepare ZIP Archive
+    $zip = new ZipArchive();
+    
+    if ($zip->open($epub_filename, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== TRUE) {
+        log_message("Cannot create ZIP archive at $epub_filename", 'FATAL');
+        return null;
+    }
+
+    // A. Add mimetype file (MUST be uncompressed and first)
+    $zip->addFromString('mimetype', 'application/epub+zip');
+    $zip->setCompressionName('mimetype', ZipArchive::CM_STORE);
+
+    // B. Add META-INF/container.xml
+    $container_xml = '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>';
+    $zip->addFromString('META-INF/container.xml', $container_xml);
+
+    // C. Add OEBPS folder contents
+    $zip->addFromString('OEBPS/content.opf', $opf_content);
+    $zip->addFromString('OEBPS/toc.ncx', $ncx_content);
+    $zip->addFromString('OEBPS/titlepage.xhtml', $titlepage_content);
+    
+    if ($cover_data) {
+        // Use the hardcoded filename
+        $zip->addFromString('OEBPS/' . $cover_filename, $cover_data);
+    }
+
+    // D. Add nav.xhtml (Minimal EPUB 3 navigation file)
+    $nav_xhtml = <<<EOT
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+  <head>
+    <title>Navigation</title>
+  </head>
+  <body>
+    <nav epub:type="toc">
+      <h1>Table of Contents</h1>
+      <ol>
+        <li><a href="titlepage.xhtml">Title Page</a></li>
+      </ol>
+    </nav>
+  </body>
+</html>
+EOT;
+    $zip->addFromString('OEBPS/nav.xhtml', $nav_xhtml);
+
+
+    $zip->close();
+
+    log_message("EPUB file successfully created at $epub_filename");
+    return $epub_filename;
+}
+// End of EPUB creation functions
+
+// --- Main Server Request Handler (POST/AJAX) ---
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    header('Content-Type: application/json');
+
+    // Make sure the zip extension is available before processing any EPUB creation requests
+    if (!extension_loaded('zip')) {
+        $error_msg = "PHP ZIP extension is not loaded. Cannot create EPUB file.";
+        log_message($error_msg, 'FATAL');
+        echo json_encode(['success' => false, 'message' => $error_msg]);
+        exit;
+    }
+    
+    // Check for GD extension now that image conversion is required
+    if (!extension_loaded('gd')) {
+        $gd_warning = "PHP GD extension is not loaded. Cover image conversion to JPEG will be skipped, which may cause EPUB validation issues.";
+        log_message($gd_warning, 'WARNING');
+        // Script can continue, but with a warning.
+    }
+    
+    // Read JSON payload for cleaner AJAX handling
+    $input = json_decode(file_get_contents('php://input'), true);
+    $action = $input['action'] ?? 'search'; 
+    
+    
+    // --- ACTION 3: MANUAL SEARCH (Fallback) ---
+    if ($action === 'manual_search') {
+        $title = trim(filter_var($input['title'] ?? '', FILTER_SANITIZE_STRING));
+        $author = trim(filter_var($input['author'] ?? '', FILTER_SANITIZE_STRING));
+        $identifier = trim("$title $author");
+
+        log_message("Received Manual Search request for: '$identifier'");
+        
+        if (empty($identifier)) {
+             echo json_encode(['success' => false, 'message' => 'Title and Author are required for manual search.']);
+             exit;
+        }
+
+        try {
+            $metadata = get_book_metadata($identifier, 'TITLE_AUTHOR');
+
+            if (!$metadata) {
+                $message = "Could not find book using manual search (Hardcover API). Try a different combination.";
+                log_message($message, 'ERROR');
+                echo json_encode(['success' => false, 'message' => $message]);
+                exit;
+            }
+            
+            // Metadata found via manual search - require confirmation
+            log_message("Metadata found via manual search. Returning for user confirmation.");
+            echo json_encode([
+                'success' => true,
+                'requires_confirmation' => true,
+                'metadata' => $metadata
+            ]);
+
+        } catch (Exception $e) {
+            $error_msg = "An unexpected error occurred during manual search: " . $e->getMessage();
+            log_message($error_msg, 'FATAL');
+            echo json_encode(['success' => false, 'message' => $error_msg]);
+        }
+        exit;
+    }
+
+    // --- ACTION 2: EPUB CREATION CONFIRMATION ---
+    if ($action === 'confirm_epub_creation') {
+        $metadata = $input['metadata'] ?? [];
+
+        if (empty($metadata) || !isset($metadata['title'])) {
+             echo json_encode(['success' => false, 'message' => 'Invalid or missing metadata for confirmation.']);
+             exit;
+        }
+        
+        log_message("Confirmation received for '{$metadata['title']}'. Starting EPUB creation.");
+
+        try {
+            $epub_file = create_epub_file($metadata);
+
+            if ($epub_file) {
+                record_processed_isbn($metadata['isbn'], $metadata['title']);
+                
+                echo json_encode([
+                    'success' => true, 
+                    'message' => "Successfully created EPUB for '{$metadata['title']}'",
+                    'filename' => $epub_file,
+                    'metadata' => [
+                        'title' => $metadata['title'],
+                        'author' => $metadata['author'],
+                        'publisher' => $metadata['publisher'],
+                        'isbn' => $metadata['isbn']
+                    ]
+                ]);
+            } else {
+                echo json_encode(['success' => false, 'message' => "EPUB creation failed for book: {$metadata['title']}"]);
+            }
+        } catch (Exception $e) {
+            $error_msg = "An unexpected error occurred during creation: " . $e->getMessage();
+            log_message($error_msg, 'FATAL');
+            echo json_encode(['success' => false, 'message' => $error_msg]);
+        }
+        exit;
+    }
+    
+    // --- ACTION 1 (Default): INITIAL ISBN SEARCH ---
+    
+    $isbn = trim(filter_var($input['isbn'] ?? '', FILTER_SANITIZE_STRING));
+    
+    try {
+        if (!empty($isbn)) {
+            log_message("Received POST request for ISBN lookup: $isbn");
+            $metadata = get_book_metadata($isbn, 'ISBN');
+        } else {
+            log_message("Invalid POST request: Missing ISBN.", 'ERROR');
+            echo json_encode(['success' => false, 'message' => 'An ISBN is required for searching.']);
+            exit;
+        }
+
+        // Check if metadata was successfully retrieved
+        if (!$metadata || $metadata['title'] === 'Title Not Found') {
+            $message = "Could not find sufficient metadata for ISBN: $isbn. Trying manual search...";
+            
+            log_message("Metadata lookup failed for ISBN: $isbn. Suggesting manual search.", 'WARNING');
+            
+            // Suggest manual search fallback
+            echo json_encode([
+                'success' => false, 
+                'message' => $message,
+                'requires_manual_search' => true,
+                'isbn_fallback' => $isbn
+            ]);
+            exit;
+        }
+        
+        // METADATA FOUND - REQUIRE CONFIRMATION
+        log_message("Metadata found. Returning for user confirmation.");
+        echo json_encode([
+            'success' => true,
+            'requires_confirmation' => true,
+            'metadata' => $metadata
+        ]);
+
+
+    } catch (Exception $e) {
+        $error_msg = "An unexpected error occurred during processing: " . $e->getMessage();
+        log_message($error_msg, 'FATAL');
+        echo json_encode(['success' => false, 'message' => $error_msg]);
+    }
+    
+    exit;
+}
+
+// --- Front-end HTML/JS (GET Request) ---
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Book Barcode Scanner & EPUB Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+  
+  <style>
+    /* Custom styling for the video feed and feedback elements */
+    #scanner-container {
+      position: relative;
+      width: 100%;
+      max-width: 500px;
+      margin: 0 auto;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 0 15px -5px rgba(0, 0, 0, 0.04);
+    }
+
+    #video {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    
+    /* Overlay for the scanning target */
+    #scan-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        pointer-events: none;
+    }
+    
+    #scan-overlay:before {
+        content: '';
+        position: absolute;
+        top: 25%;
+        left: 10%;
+        right: 10%;
+        bottom: 25%;
+        border: 2px solid #3b82f6; /* Blue border */
+        box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5); /* Dark background outside the target */
+        border-radius: 4px;
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+      70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+    }
+    
+    .pulsing {
+        animation: pulse 1.5s infinite;
+    }
+    
+    .cover-image {
+        width: 150px;
+        height: 225px;
+        object-fit: cover;
+        margin: 0 auto 16px;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        background-color: #e5e7eb; /* Light gray background for loading */
+    }
+
+  </style>
+
+</head>
+
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8 font-sans">
+  
+  <div class="max-w-4xl mx-auto bg-white p-6 md:p-10 rounded-xl shadow-2xl">
+
+    <h1 class="text-3xl font-extrabold text-gray-900 mb-6 text-center">
+      📚 Book Barcode Scanner & EPUB Generator
+    </h1>
+    <p class="text-center text-gray-600 mb-8">
+      Scan a book's barcode (ISBN) to automatically fetch metadata from **Hardcover**, **Google Books**, and **Open Library**, and generate a starter EPUB file.
+    </p>
+
+    <div id="scanner-container">
+      <video id="video" class="rounded-xl"></video>
+      <div id="scan-overlay"></div>
+    </div>
+    
+    <div id="status" class="mt-4 p-3 rounded-lg text-center font-medium bg-blue-100 text-blue-800 transition duration-300 ease-in-out">
+      Initializing Scanner...
+    </div>
+
+    <div class="mt-6 flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
+      <select id="camera-select" 
+        class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+        </select>
+      <button id="start-button" 
+        class="bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-blue-700 transition duration-150 ease-in-out shadow-md shadow-blue-300 disabled:opacity-50"
+        disabled>
+        Start Scanning
+      </button>
+    </div>
+
+    <div class="mt-8 border-t pt-6">
+      <h2 class="text-xl font-semibold text-gray-800 mb-4">
+        Processing Log
+      </h2>
+      <pre id="result" class="bg-gray-100 p-4 rounded-lg text-sm text-gray-700 whitespace-pre-wrap break-words overflow-x-auto h-48 max-h-48">Awaiting first scan...</pre>
+    </div>
+  </div>
+    
+  <div id="confirmation-modal" 
+       class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 hidden items-center justify-center p-4">
+      <div class="bg-white p-8 rounded-xl shadow-2xl max-w-sm w-full text-center transform transition-all duration-300 scale-95 opacity-0"
+           id="confirmation-modal-content">
+          <h3 class="text-2xl font-bold text-gray-800 mb-4">
+              Confirm Book Details
+          </h3>
+          <img id="modal-cover" class="cover-image mx-auto mb-4" alt="Book Cover">
+          <p class="text-gray-700 mb-2">
+              <span class="font-semibold">Title:</span> <span id="modal-title"></span>
+          </p>
+          <p class="text-gray-700 mb-4">
+              <span class="font-semibold">Author:</span> <span id="modal-author"></span>
+          </p>
+          <p class="text-sm text-gray-500 mb-6">
+              ISBN: <span id="modal-isbn"></span>
+          </p>
+          <div class="flex flex-wrap justify-center gap-4">
+              <button id="confirm-button" 
+                      class="bg-green-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-green-700 transition duration-150 ease-in-out shadow-md shadow-green-300">
+                  Generate EPUB
+              </button>
+              <button id="manual-entry-button"
+                      class="bg-yellow-500 text-white font-semibold py-3 px-6 rounded-lg hover:bg-yellow-600 transition duration-150 ease-in-out shadow-md shadow-yellow-300">
+                  Not right? Enter manually
+              </button>
+              <button id="cancel-button" 
+                      class="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg hover:bg-gray-400 transition duration-150 ease-in-out">
+                  Cancel
+              </button>
+          </div>
+      </div>
+  </div>
+
+  <div id="manual-search-modal" 
+       class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 hidden items-center justify-center p-4">
+      <div class="bg-white p-8 rounded-xl shadow-2xl max-w-md w-full text-center transform transition-all duration-300 scale-95 opacity-0"
+           id="manual-search-modal-content">
+          <h3 class="text-2xl font-bold text-gray-800 mb-4">
+              ISBN Not Found
+          </h3>
+          <p class="text-gray-700 mb-6">
+              We couldn't find metadata for ISBN <span id="fallback-isbn" class="font-mono font-semibold"></span>. Try searching manually by title and author.
+          </p>
+          <form id="manual-search-form" class="space-y-4">
+              <div>
+                  <label for="search-title" class="block text-left text-sm font-medium text-gray-700 mb-1">Title</label>
+                  <input type="text" id="search-title" required
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+              </div>
+              <div>
+                  <label for="search-author" class="block text-left text-sm font-medium text-gray-700 mb-1">Author</label>
+                  <input type="text" id="search-author" required
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+              </div>
+              <button type="submit" id="manual-search-button"
+                      class="w-full bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-blue-700 transition duration-150 ease-in-out shadow-md shadow-blue-300">
+                  Search Manually
+              </button>
+              <button type="button" id="manual-cancel-button" 
+                      class="w-full bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg hover:bg-gray-400 transition duration-150 ease-in-out">
+                  Cancel & Restart Scanner
+              </button>
+          </form>
+          <div id="manual-search-status" class="mt-4 text-sm text-red-600 font-medium"></div>
+      </div>
+  </div>
+
+  <script>
+    const ZXing = window.ZXing;
+    const codeReader = new ZXing.BrowserMultiFormatReader();
+    let selectedDeviceId;
+    let currentMetadata = {};
+
+    const videoElement = document.getElementById('video');
+    const statusElement = document.getElementById('status');
+    const resultElement = document.getElementById('result');
+    const cameraSelect = document.getElementById('camera-select');
+    const startButton = document.getElementById('start-button');
+    const scanOverlay = document.getElementById('scan-overlay');
+    
+    // Modals and form elements
+    const confirmationModal = document.getElementById('confirmation-modal');
+    const confirmationModalContent = document.getElementById('confirmation-modal-content');
+    const manualSearchModal = document.getElementById('manual-search-modal');
+    const manualSearchModalContent = document.getElementById('manual-search-modal-content');
+    const confirmButton = document.getElementById('confirm-button');
+    const cancelButton = document.getElementById('cancel-button');
+    const manualEntryButton = document.getElementById('manual-entry-button');
+    const manualSearchForm = document.getElementById('manual-search-form');
+    const manualCancelButton = document.getElementById('manual-cancel-button');
+    const manualSearchButton = document.getElementById('manual-search-button');
+    const manualSearchStatus = document.getElementById('manual-search-status');
+
+    let currentFallbackISBN = ''; // Stores the ISBN that failed initial lookup
+
+    // --- Utility Functions ---
+
+    function updateStatus(message, isScanning = true) {
+      statusElement.textContent = message;
+      statusElement.className = `mt-4 p-3 rounded-lg text-center font-medium transition duration-300 ease-in-out ${
+        isScanning ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'
+      }`;
+      if (isScanning) {
+          scanOverlay.classList.add('pulsing');
+      } else {
+          scanOverlay.classList.remove('pulsing');
+      }
+    }
+
+    function logResult(message) {
+        const timestamp = new Date().toLocaleTimeString();
+        resultElement.textContent = `[${timestamp}] ${message}\n` + resultElement.textContent;
+    }
+    
+    function showModal(modal, content) {
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        // Trigger transition for scale/opacity
+        setTimeout(() => {
+            content.classList.remove('opacity-0', 'scale-95');
+            content.classList.add('opacity-100', 'scale-100');
+        }, 10);
+    }
+
+    function hideModal(modal, content) {
+        content.classList.remove('opacity-100', 'scale-100');
+        content.classList.add('opacity-0', 'scale-95');
+        // Hide completely after transition
+        setTimeout(() => {
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
+        }, 300);
+    }
+    
+    function restartScannerAfterDelay(delay = 300) {
+        logResult('Processing complete. Restarting scan shortly...');
+        updateStatus(`Restarting scan in ${delay / 1000} seconds...`, false);
+        setTimeout(startScanning, delay); 
+    }
+    
+    // --- Manual Search Handlers ---
+    
+    function showManualSearchModal(isbn) {
+        currentFallbackISBN = isbn;
+        document.getElementById('fallback-isbn').textContent = isbn;
+        manualSearchStatus.textContent = '';
+        document.getElementById('search-title').value = '';
+        document.getElementById('search-author').value = '';
+        
+        showModal(manualSearchModal, manualSearchModalContent);
+    }
+    
+    async function handleManualSearch(event) {
+        event.preventDefault();
+        manualSearchStatus.textContent = '';
+        manualSearchButton.disabled = true;
+        manualSearchButton.textContent = 'Searching...';
+        
+        const title = document.getElementById('search-title').value.trim();
+        const author = document.getElementById('search-author').value.trim();
+        
+        if (!title || !author) {
+            manualSearchStatus.textContent = 'Please enter both a Title and an Author.';
+            manualSearchButton.disabled = false;
+            manualSearchButton.textContent = 'Search Manually';
+            return;
+        }
+
+        try {
+            logResult(`Attempting manual search for: ${title} by ${author}`);
+            const response = await fetch('index.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'manual_search',
+                    title: title,
+                    author: author,
+                    isbn_fallback: currentFallbackISBN 
+                })
+            });
+
+            const data = await response.json();
+            
+            if (data.success && data.requires_confirmation) {
+                // Manually found data is confirmed via the standard modal
+                hideModal(manualSearchModal, manualSearchModalContent);
+                showConfirmationModal(data.metadata);
+            } else {
+                manualSearchStatus.textContent = data.message || 'Manual search failed. Try different keywords.';
+            }
+
+        } catch (error) {
+            console.error('Manual search error:', error);
+            manualSearchStatus.textContent = 'An network error occurred during manual search.';
+        } finally {
+            manualSearchButton.disabled = false;
+            manualSearchButton.textContent = 'Search Manually';
+        }
+    }
+    
+    // --- Server Communication ---
+
+    async function processISBNOnServer(isbn) {
+      updateStatus('Processing ISBN. Please wait...', false);
+      logResult(`Attempting API lookup for ISBN: ${isbn}`);
+      
+      try {
+        const response = await fetch('index.php', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ isbn: isbn, action: 'search' })
+        });
+        
+        const data = await response.json();
+
+        if (data.success && data.requires_confirmation) {
+            // Success: Show confirmation modal
+            logResult('SUCCESS: Metadata found from API.');
+            showConfirmationModal(data.metadata);
+        } else if (data.requires_manual_search) {
+            // Failure: Fallback to manual search
+            logResult(`FAILURE: ${data.message}`);
+            showManualSearchModal(isbn);
+        } else {
+            // Complete failure / error
+            logResult(`ERROR: ${data.message || 'Unknown server error.'}`);
+            restartScannerAfterDelay();
+        }
+
+      } catch (error) {
+        logResult(`NETWORK ERROR: ${error.message}. Restarting scan.`);
+        console.error('Network Error:', error);
+        restartScannerAfterDelay();
+      }
+    }
+    
+    async function confirmCreation(metadata) {
+        confirmButton.disabled = true;
+        confirmButton.textContent = 'Generating...';
+        logResult(`Confirmation received. Generating EPUB for ${metadata.title}...`);
+
+        try {
+            const response = await fetch('index.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'confirm_epub_creation', metadata: metadata })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                logResult(`SUCCESS: ${data.message}. File: ${data.filename}`);
+                // In a real environment, you'd trigger a download here.
+                // For this embedded environment, we just show the final log.
+            } else {
+                logResult(`EPUB GENERATION FAILED: ${data.message}`);
+            }
+
+        } catch (error) {
+            logResult(`NETWORK ERROR during generation: ${error.message}`);
+            console.error('Generation Error:', error);
+        } finally {
+            hideModal(confirmationModal, confirmationModalContent);
+            confirmButton.disabled = false;
+            confirmButton.textContent = 'Generate EPUB';
+            restartScannerAfterDelay();
+        }
+    }
+
+    function showConfirmationModal(metadata) {
+      currentMetadata = metadata;
+      
+      document.getElementById('modal-title').textContent = metadata.title;
+      document.getElementById('modal-author').textContent = metadata.author;
+      document.getElementById('modal-isbn').textContent = metadata.isbn;
+      
+      const coverImg = document.getElementById('modal-cover');
+      if (metadata.cover_url) {
+          coverImg.src = metadata.cover_url;
+          coverImg.onerror = () => coverImg.src = 'https://placehold.co/150x225/e5e7eb/333?text=NO+COVER';
+      } else {
+          coverImg.src = 'https://placehold.co/150x225/e5e7eb/333?text=NO+COVER';
+      }
+
+      showModal(confirmationModal, confirmationModalContent);
+    }
+    
+    // --- Scanning Logic ---
+
+    function startScanning() {
+      const selectedDeviceId = cameraSelect.value;
+      if (!selectedDeviceId) {
+          updateStatus('No camera selected.', false);
+          return;
+      }
+      
+      codeReader.decodeFromVideoDevice(selectedDeviceId, 'video', async (result, err) => {
+        if (result) {
+          // **STEP 1: Stop scanning on successful read**
+          codeReader.reset();
+          const isbn = result.text;
+          logResult(`Barcode found: ${isbn}`);
+
+          // **STEP 2: Send ISBN to server for processing**
+          await processISBNOnServer(isbn); 
+              
+          // NOTE: Restarting is handled inside processISBNOnServer or the modal handlers
+          
+        } else if (err && !(err instanceof ZXing.NotFoundException)) {
+          console.error(err)
+          updateStatus('Error during scanning.');
+          logResult(`Scanning Error: ${err.message || 'Unknown error'}`);
+        }
+      });
+      updateStatus('Scanning for ISBN barcode...', true);
+      logResult(`Started continuous decode from camera with id ${selectedDeviceId}`);
+      startButton.textContent = 'Scanning...';
+      startButton.disabled = true;
+    }
+
+
+    // --- Initialization ---
+
+    window.addEventListener('load', () => {
+      // 1. Initialize camera devices
+      codeReader.getVideoInputDevices()
+        .then((videoInputDevices) => {
+          
+          let preferredDeviceId = null;
+          
+          // Fallback to the first device found
+          if (videoInputDevices.length > 0) {
+              preferredDeviceId = videoInputDevices[0].deviceId;
+          }
+
+          // **PRIORITY LOGIC: Check for 'back' or 'environment' to select rear camera**
+          videoInputDevices.forEach(device => {
+              const label = device.label.toLowerCase();
+              if (label.includes('back') || label.includes('environment')) {
+                  preferredDeviceId = device.deviceId;
+              }
+          });
+
+          // Populate the camera selection dropdown
+          videoInputDevices.forEach(device => {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            option.text = device.label || `Camera ${cameraSelect.length + 1}`;
+            cameraSelect.appendChild(option);
+          });
+          
+          if (videoInputDevices.length > 0) {
+            selectedDeviceId = preferredDeviceId;
+            cameraSelect.value = selectedDeviceId; // Set the preferred device in the dropdown
+            updateStatus('Ready to scan. Select a camera if needed.', false);
+            startButton.disabled = false;
+            startButton.textContent = 'Start Scanning';
+          } else {
+            updateStatus('No video input devices found.', false);
+          }
+
+          // 2. Set up event listeners
+          startButton.addEventListener('click', startScanning);
+          cameraSelect.addEventListener('change', (e) => {
+              selectedDeviceId = e.target.value;
+              // Reset and restart scanning immediately if the camera is changed while scanning
+              if (startButton.disabled) {
+                  codeReader.reset();
+                  startScanning();
+              }
+          });
+          
+          // Confirmation Modal Listeners
+          confirmButton.addEventListener('click', () => confirmCreation(currentMetadata));
+          cancelButton.addEventListener('click', () => {
+              hideModal(confirmationModal, confirmationModalContent);
+              restartScannerAfterDelay(100); // Quick restart after cancel
+          });
+
+          manualEntryButton.addEventListener('click', () => {
+              hideModal(confirmationModal, confirmationModalContent);
+              showManualSearchModal(currentMetadata.isbn);
+          });
+          
+          // Manual Search Modal Listeners
+          manualSearchForm.addEventListener('submit', handleManualSearch);
+          manualCancelButton.addEventListener('click', () => {
+              hideModal(manualSearchModal, manualSearchModalContent);
+              restartScannerAfterDelay(100); // Quick restart after cancel
+          });
+
+          // 3. Optional: Auto-start scanning if a device is available
+          if (selectedDeviceId) {
+             startScanning();
+          }
+
+        })
+        .catch((err) => {
+          console.error(err)
+          updateStatus(`Initialization Error: ${err.message || 'Check camera permissions.'}`);
+        })
+    });
+  </script>
+
+</body>
+
+</html>

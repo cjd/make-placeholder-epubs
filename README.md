@@ -1,0 +1,71 @@
+# Book Barcode Scanner & EPUB Generator
+
+This project is a PHP-based web application that allows you to scan a book's barcode (ISBN) using your device's camera, fetch its metadata from various online sources, and generate a basic EPUB file.
+
+## Features
+
+*   **Barcode Scanning:** Uses your device's camera to scan ISBN barcodes directly in the browser.
+*   **Metadata Fetching:** Retrieves book information (title, author, description, etc.) from Hardcover, Google Books, and Open Library.
+*   **EPUB Generation:** Creates a simple `.epub` file with the fetched metadata and a cover image.
+*   **Web Interface:** Provides a user-friendly interface for scanning and generating EPUBs.
+
+## Configuration
+
+Before running the application, you need to create a `.env` file in the root of the project to store your API credentials.
+
+1.  **Create the .env file:**
+
+    ```bash
+    touch .env
+    ```
+
+2.  **Add the Hardcover API Token:**
+
+    Open the `.env` file and add the following line:
+
+    ```
+    HARDCOVER_BEARER_TOKEN="your_hardcover_bearer_token"
+    ```
+
+    Replace `"your_hardcover_bearer_token"` with your actual Hardcover API bearer token.
+
+### How to get a Hardcover API Token
+
+1.  Go to your **Account Settings** on the Hardcover website.
+2.  Click on the **Hardcover API** link.
+3.  Your API token will be displayed at the top of the page.
+
+## Usage
+
+1.  **Start the PHP Server:**
+
+    You can use PHP's built-in web server to run the application. Open your terminal in the project's root directory and run the following command:
+
+    ```bash
+    php -S localhost:8000
+    ```
+
+2.  **Open the Application:**
+
+    Open your web browser and navigate to `http://localhost:8000`.
+
+3.  **Scan a Barcode:**
+
+    *   Allow the browser to access your camera.
+    *   Point your camera at a book's barcode.
+    *   The application will automatically detect the ISBN and fetch the book's metadata.
+
+4.  **Generate the EPUB:**
+
+    *   A confirmation modal will appear with the fetched metadata.
+    *   Click the "Generate EPUB" button to create the `.epub` file.
+    *   The generated file will be saved in the `epubs/` directory.
+
+## Dependencies
+
+This application requires the following PHP extensions to be enabled:
+
+*   `zip`: For creating the EPUB file (which is a zip archive).
+*   `gd`: For processing and converting cover images.
+*   `fileinfo`: For detecting MIME types of downloaded cover images.
+*   `curl`: For making HTTP requests to the book metadata APIs.
