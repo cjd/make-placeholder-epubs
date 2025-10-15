@@ -370,6 +370,11 @@ function create_opf_content($metadata, $cover_mime = 'image/jpeg') {
         $cover_meta = '<meta name="cover" content="cover-image"/>';
     }
 
+    $subtitle_meta = '';
+    if ($subtitle) {
+        $subtitle_meta = "<meta property=\"title-type\" refines=\"#title\">subtitle</meta><meta property=\"alternate-title\" refines=\"#title\">{$subtitle}</meta>";
+    }
+
     return <<<EOT
 <?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
