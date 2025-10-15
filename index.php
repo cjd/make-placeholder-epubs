@@ -268,8 +268,8 @@ function get_open_library_metadata($isbn) {
 
 // --- Metadata Retrieval Functions (Gemini Vision) ---
 
-function get_gemini_book_suggestion($base64_image_data) {
-    log_message("Attempting to get book suggestion from Gemini Vision");
+function get_gemini_cover_suggestion($base64_image_data) {
+    log_message("Attempting to get book suggestion and cover from Gemini Vision");
     $api_key = GEMINI_API_KEY;
     if (empty($api_key)) {
         log_message("GEMINI_API_KEY is not configured.", 'ERROR');
@@ -278,7 +278,6 @@ function get_gemini_book_suggestion($base64_image_data) {
 
     $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" . $api_key;
 
-    // Extract the image data from the data URL scheme
     $image_data = substr($base64_image_data, strpos($base64_image_data, ',') + 1);
 
     $payload = json_encode([
@@ -286,7 +285,7 @@ function get_gemini_book_suggestion($base64_image_data) {
             [
                 'parts' => [
                     [
-                        'text' => "Analyze the image of the book cover and identify the title and author. Respond with a single, clean JSON object with two keys: 'title' and 'author'. For example: {\"title\": \"The Hobbit\", \"author\": \"J.R.R. Tolkien\"}."
+                        'text' => "Analyze the image, which contains a book cover. Identify the book's title and author. Respond with a single, clean JSON object with two keys: 'title' and 'author'. For example: {\"title\": \"The Hobbit\", \"author\": \"J.R.R. Tolkien\"}."
                     ],
                     [
                         'inline_data' => [
@@ -308,12 +307,13 @@ function get_gemini_book_suggestion($base64_image_data) {
         
         if (isset($json['candidates'][0]['content']['parts'][0]['text'])) {
             $text = $json['candidates'][0]['content']['parts'][0]['text'];
-            // Clean the response to get only the JSON part
             $json_text = substr($text, strpos($text, '{'), strrpos($text, '}') - strpos($text, '{') + 1);
             $book_data = json_decode($json_text, true);
 
             if (isset($book_data['title']) && isset($book_data['author'])) {
                 log_message("Gemini Vision success: Found title '{$book_data['title']}' and author '{$book_data['author']}'");
+                // Add the original image data to the response
+                $book_data['cover_url'] = $base64_image_data;
                 return $book_data;
             }
         }
@@ -686,15 +686,20 @@ function create_epub_file($metadata) {
     $has_cover_url = isset($metadata['cover_url']) && !empty($metadata['cover_url']);
 
     if ($has_cover_url) {
-        $cover_download = download_file($metadata['cover_url']);
-        if ($cover_download) {
-            // The download_file function now guarantees conversion to 'image/jpeg' if it's a convertible image.
-            if ($cover_download['mime'] === 'image/jpeg') {
-                $cover_data = $cover_download['content'];
-                log_message("Cover image is available as JPEG: $cover_filename");
-            } else {
-                // If it's not a JPEG (e.g., failed conversion or non-image), treat as no cover
-                log_message("Downloaded file was not a convertible image or GD is missing. Treating as no cover.", 'WARNING');
+        if (strpos($metadata['cover_url'], 'data:image') === 0) {
+            $cover_data = base64_decode(substr($metadata['cover_url'], strpos($metadata['cover_url'], ',') + 1));
+            log_message("Using base64 encoded cover image.");
+        } else {
+            $cover_download = download_file($metadata['cover_url']);
+            if ($cover_download) {
+                // The download_file function now guarantees conversion to 'image/jpeg' if it's a convertible image.
+                if ($cover_download['mime'] === 'image/jpeg') {
+                    $cover_data = $cover_download['content'];
+                    log_message("Cover image is available as JPEG: $cover_filename");
+                } else {
+                    // If it's not a JPEG (e.g., failed conversion or non-image), treat as no cover
+                    log_message("Downloaded file was not a convertible image or GD is missing. Treating as no cover.", 'WARNING');
+                }
             }
         }
     }
@@ -798,18 +803,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         try {
-            $suggestion = get_gemini_book_suggestion($image_data);
+            $gemini_suggestion = get_gemini_cover_suggestion($image_data);
 
-            if ($suggestion && !empty($suggestion['title']) && !empty($suggestion['author'])) {
-                $metadata = get_book_metadata($suggestion['title'], 'TITLE_AUTHOR', $suggestion['author']);
+            $options = [];
+            if ($gemini_suggestion && !empty($gemini_suggestion['title']) && !empty($gemini_suggestion['author'])) {
+                $gemini_suggestion['source'] = 'Gemini Vision';
+                $options[] = $gemini_suggestion;
 
-                if (isset($metadata['multiple_options'])) {
-                    echo json_encode(['success' => true, 'requires_selection' => true, 'options' => $metadata['multiple_options']]);
-                } else if ($metadata) {
-                    echo json_encode(['success' => true, 'requires_confirmation' => true, 'metadata' => $metadata]);
-                } else {
-                    echo json_encode(['success' => false, 'message' => 'Gemini found a title/author, but no metadata could be found.']);
+                $metadata = get_book_metadata($gemini_suggestion['title'], 'TITLE_AUTHOR', $gemini_suggestion['author']);
+                if ($metadata) {
+                    if (isset($metadata['multiple_options'])) {
+                        $options = array_merge($options, $metadata['multiple_options']);
+                    } else {
+                        $options[] = $metadata;
+                    }
                 }
+            }
+
+            if (count($options) > 0) {
+                echo json_encode(['success' => true, 'requires_selection' => true, 'options' => $options]);
             } else {
                 echo json_encode(['success' => false, 'message' => 'Could not identify book from cover. Please try manual entry.']);
             }
@@ -1343,12 +1355,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         options.forEach(option => {
             const optionDiv = document.createElement('div');
             optionDiv.className = 'p-4 border rounded-lg text-center';
+            if (option.source === 'Gemini Vision') {
+                optionDiv.classList.add('border-purple-500', 'border-2');
+            }
+
             const subtitleHTML = option.subtitle ? `<p class="text-sm text-gray-500">${option.subtitle}</p>` : '';
             optionDiv.innerHTML = `
                 <img src="${option.cover_url || 'https://placehold.co/150x225/e5e7eb/333?text=NO+COVER'}" alt="Cover for ${option.title}" class="cover-image mx-auto">
                 <h4 class="font-semibold">${option.title}</h4>
                 ${subtitleHTML}
                 <p class="text-sm text-gray-600">${option.author}</p>
+                <p class="text-xs text-gray-500 mt-2">Source: ${option.source}</p>
                 <button class="mt-4 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-150 ease-in-out">Select</button>
             `;
             optionDiv.querySelector('button').addEventListener('click', () => {
@@ -1433,11 +1450,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             const data = await response.json();
 
             if (data.success && data.requires_selection) {
-                hideModal(coverScanModal, coverScanModalContent, null);
-                showSelectionModal(data.options);
-            } else if (data.success && data.requires_confirmation) {
-                hideModal(coverScanModal, coverScanModalContent, null);
-                showConfirmationModal(data.metadata);
+                hideModal(coverScanModal, coverScanModalContent, () => {
+                    showSelectionModal(data.options);
+                });
             } else {
                 coverScanStatus.textContent = data.message || 'Analysis failed. Please try again or enter manually.';
             }
