@@ -10,9 +10,16 @@ To integrate this into Booklore I set the bookdrop path to point to the epub dir
 ## Features
 
 * **Barcode Scanning:** Uses your device's camera to scan ISBN barcodes directly in the browser.
-* **Metadata Fetching:** Retrieves book information (title, author, description, etc.) from Hardcover, Google Books, and Open Library.
+* **Metadata Fetching:** Retrieves book information (title, subtitle, author, description, etc.) from Hardcover, Google Books, and Open Library.
+* **Manual Search:** If an ISBN is not found, you can search for the book manually by title and author. The app will query both the Hardcover and Open Library APIs.
 * **EPUB Generation:** Creates a simple `.epub` file with the fetched metadata and a cover image.
 * **Web Interface:** Provides a user-friendly interface for scanning and generating EPUBs.
+
+## Recent Changes
+
+* **Enhanced Manual Search:** The manual search functionality now queries both the Hardcover and Open Library APIs, increasing the chances of finding your book.
+* **Scrollable Book Selection:** When multiple book options are found, the selection dialog is now scrollable to accommodate a large number of results.
+* **Subtitle Support:** The application now fetches, displays, and includes subtitles in the generated EPUB file.
 
 ## Configuration
 
