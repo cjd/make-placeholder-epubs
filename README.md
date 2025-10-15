@@ -17,6 +17,7 @@ To integrate this into Booklore I set the bookdrop path to point to the epub dir
 
 ## Recent Changes
 
+* **Gemini Cover Lookup:** The application can now use Google's Gemini API to find a cover image for a book if one is not available from other sources.
 * **Enhanced Manual Search:** The manual search functionality now queries both the Hardcover and Open Library APIs, increasing the chances of finding your book.
 * **Scrollable Book Selection:** When multiple book options are found, the selection dialog is now scrollable to accommodate a large number of results.
 * **Subtitle Support:** The application now fetches, displays, and includes subtitles in the generated EPUB file.
@@ -37,18 +38,27 @@ Before running the application, you need to create a `.env` file in the root of 
 
    ```.env
    HARDCOVER_BEARER_TOKEN="your_hardcover_bearer_token"
+   GEMINI_API_KEY="your_gemini_api_key"
    DEBUG_LOG_FILE=debug.log
    EPUB_DIR=epubs/
    ISBN_LIST_FILE=processed_isbns.txt
    ```
 
    Replace `"your_hardcover_bearer_token"` with your actual Hardcover API bearer token.
+   Replace `"your_gemini_api_key"` with your actual Gemini API key.
 
 ### How to get a Hardcover API Token
 
 1. Go to your **Account Settings** on the Hardcover website.
 2. Click on the **Hardcover API** link.
 3. Your API token will be displayed at the top of the page.
+
+### How to get a Gemini API Key
+
+1. Go to [Google AI Studio](https://aistudio.google.com/).
+2. Sign in with your Google account.
+3. Click on the "Get API key" button.
+4. Your API key will be displayed.
 
 ## Usage
 
