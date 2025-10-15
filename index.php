@@ -36,6 +36,9 @@ if (!defined('EPUB_DIR')) {
 if (!defined('ISBN_LIST_FILE')) {
     define('ISBN_LIST_FILE', 'processed_isbns.txt');
 }
+if (!defined('GEMINI_API_KEY')) {
+    define('GEMINI_API_KEY', ''); // Define as empty if not found
+}
 
 define('HARDCOVER_GRAPHQL_ENDPOINT', 'https://api.hardcover.app/v1/graphql');
 
@@ -258,6 +261,63 @@ function get_open_library_metadata($isbn) {
     }
     return null;
 }
+
+// --- Metadata Retrieval Functions (Gemini Vision) ---
+
+function get_gemini_book_suggestion($base64_image_data) {
+    log_message("Attempting to get book suggestion from Gemini Vision");
+    $api_key = GEMINI_API_KEY;
+    if (empty($api_key)) {
+        log_message("GEMINI_API_KEY is not configured.", 'ERROR');
+        return null;
+    }
+
+    $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" . $api_key;
+
+    // Extract the image data from the data URL scheme
+    $image_data = substr($base64_image_data, strpos($base64_image_data, ',') + 1);
+
+    $payload = json_encode([
+        'contents' => [
+            [
+                'parts' => [
+                    [
+                        'text' => "Analyze the image of the book cover and identify the title and author. Respond with a single, clean JSON object with two keys: 'title' and 'author'. For example: {\"title\": \"The Hobbit\", \"author\": \"J.R.R. Tolkien\"}."
+                    ],
+                    [
+                        'inline_data' => [
+                            'mime_type' => 'image/jpeg',
+                            'data' => $image_data
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]);
+
+    $headers = ['Content-Type: application/json'];
+
+    $response = fetch_url($url, $headers, $payload);
+
+    if ($response) {
+        $json = json_decode($response, true);
+        
+        if (isset($json['candidates'][0]['content']['parts'][0]['text'])) {
+            $text = $json['candidates'][0]['content']['parts'][0]['text'];
+            // Clean the response to get only the JSON part
+            $json_text = substr($text, strpos($text, '{'), strrpos($text, '}') - strpos($text, '{') + 1);
+            $book_data = json_decode($json_text, true);
+
+            if (isset($book_data['title']) && isset($book_data['author'])) {
+                log_message("Gemini Vision success: Found title '{$book_data['title']}' and author '{$book_data['author']}'");
+                return $book_data;
+            }
+        }
+        log_message("Gemini Vision API: Could not parse title and author from response.", 'WARNING');
+    }
+    return null;
+}
+
 
 /**
  * Consolidates metadata from Hardcover, Google Books, and Open Library.
@@ -716,6 +776,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = json_decode(file_get_contents('php://input'), true);
     $action = $input['action'] ?? 'search'; 
     
+    // --- ACTION: GEMINI COVER SEARCH ---
+    if ($action === 'gemini_cover_search') {
+        $image_data = $input['image_data'] ?? null;
+
+        if (empty($image_data)) {
+            echo json_encode(['success' => false, 'message' => 'No image data provided for analysis.']);
+            exit;
+        }
+
+        try {
+            $suggestion = get_gemini_book_suggestion($image_data);
+
+            if ($suggestion && !empty($suggestion['title']) && !empty($suggestion['author'])) {
+                $metadata = get_book_metadata($suggestion['title'], 'TITLE_AUTHOR', $suggestion['author']);
+
+                if (isset($metadata['multiple_options'])) {
+                    echo json_encode(['success' => true, 'requires_selection' => true, 'options' => $metadata['multiple_options']]);
+                } else if ($metadata) {
+                    echo json_encode(['success' => true, 'requires_confirmation' => true, 'metadata' => $metadata]);
+                } else {
+                    echo json_encode(['success' => false, 'message' => 'Gemini found a title/author, but no metadata could be found.']);
+                }
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Could not identify book from cover. Please try manual entry.']);
+            }
+        } catch (Exception $e) {
+            $error_msg = "An unexpected error occurred during Gemini search: " . $e->getMessage();
+            log_message($error_msg, 'FATAL');
+            echo json_encode(['success' => false, 'message' => $error_msg]);
+        }
+        exit;
+    }
     
     // --- ACTION 3: MANUAL SEARCH (Fallback) ---
     if ($action === 'manual_search') {
@@ -951,15 +1043,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       Initializing Scanner...
     </div>
 
-    <div class="mt-6 flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
-      <select id="camera-select" 
-        class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+    <div class="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <button id="toggle-scan-button" 
+                class="bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-blue-700 transition duration-150 ease-in-out shadow-md shadow-blue-300 disabled:opacity-50" 
+                disabled>
+            Start Barcode Scan
+        </button>
+        <button id="main-manual-lookup-button" 
+                class="bg-yellow-500 text-white font-semibold py-3 px-6 rounded-lg hover:bg-yellow-600 transition duration-150 ease-in-out shadow-md shadow-yellow-300">
+            Manual Lookup
+        </button>
+        <button id="main-scan-cover-button" 
+                class="bg-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-purple-700 transition duration-150 ease-in-out shadow-md shadow-purple-300">
+            Scan Cover
+        </button>
+    </div>
+
+    <div class="mt-4">
+        <label for="camera-select" class="sr-only">Select Camera</label>
+        <select id="camera-select" 
+            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
         </select>
-      <button id="start-button" 
-        class="bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-blue-700 transition duration-150 ease-in-out shadow-md shadow-blue-300 disabled:opacity-50"
-        disabled>
-        Start Scanning
-      </button>
     </div>
 
     <div class="mt-8 border-t pt-6">
@@ -1039,6 +1143,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <p class="text-gray-700 mb-6">
               We couldn't find metadata for ISBN <span id="fallback-isbn" class="font-mono font-semibold"></span>. Try searching manually by title and author.
           </p>
+          
+          <div class="border-t border-b border-gray-200 my-6 py-4">
+              <p class="text-gray-600 mb-4">Or, use your camera to identify the book from its cover:</p>
+              <button type="button" id="show-cover-scan-button"
+                      class="w-full bg-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-purple-700 transition duration-150 ease-in-out shadow-md shadow-purple-300">
+                  📷 Scan Book Cover with Camera
+              </button>
+          </div>
+
           <form id="manual-search-form" class="space-y-4">
               <div>
                   <label for="search-title" class="block text-left text-sm font-medium text-gray-700 mb-1">Title</label>
@@ -1063,18 +1176,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       </div>
   </div>
 
+  <div id="cover-scan-modal" 
+       class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 hidden items-center justify-center p-4">
+      <div class="bg-white p-8 rounded-xl shadow-2xl max-w-2xl w-full text-center transform transition-all duration-300 scale-95 opacity-0"
+           id="cover-scan-modal-content">
+          <h3 class="text-2xl font-bold text-gray-800 mb-4">
+              Scan Book Cover
+          </h3>
+          <p class="text-gray-700 mb-6">
+              Position the book's cover in the frame and click "Capture & Analyze".
+          </p>
+          <div id="cover-scanner-container" class="relative w-full max-w-lg mx-auto rounded-lg overflow-hidden shadow-lg mb-4">
+              <video id="cover-video" class="w-full h-auto display-block"></video>
+          </div>
+          <div id="cover-scan-status" class="mt-4 text-sm text-blue-600 font-medium"></div>
+          <div class="flex flex-wrap justify-center gap-4 mt-4">
+              <button id="capture-cover-button"
+                      class="bg-green-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-green-700 transition duration-150 ease-in-out shadow-md shadow-green-300">
+                  Capture & Analyze
+              </button>
+              <button id="cover-scan-cancel-button" 
+                      class="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg hover:bg-gray-400 transition duration-150 ease-in-out">
+                  Cancel
+              </button>
+          </div>
+      </div>
+  </div>
+
   <script>
     const ZXing = window.ZXing;
     const codeReader = new ZXing.BrowserMultiFormatReader();
     let selectedDeviceId;
+
     let currentMetadata = {};
 
     const videoElement = document.getElementById('video');
     const statusElement = document.getElementById('status');
     const resultElement = document.getElementById('result');
     const cameraSelect = document.getElementById('camera-select');
-    const startButton = document.getElementById('start-button');
     const scanOverlay = document.getElementById('scan-overlay');
+
+    // Main control buttons
+    const toggleScanButton = document.getElementById('toggle-scan-button');
+    const mainManualLookupButton = document.getElementById('main-manual-lookup-button');
+    const mainScanCoverButton = document.getElementById('main-scan-cover-button');
     
     // Modals and form elements
     const confirmationModal = document.getElementById('confirmation-modal');
@@ -1093,9 +1238,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     const manualSearchButton = document.getElementById('manual-search-button');
     const manualSearchStatus = document.getElementById('manual-search-status');
 
+    // Cover Scan Modal Elements
+    const coverScanModal = document.getElementById('cover-scan-modal');
+    const coverScanModalContent = document.getElementById('cover-scan-modal-content');
+    const showCoverScanButton = document.getElementById('show-cover-scan-button');
+    const coverVideoElement = document.getElementById('cover-video');
+    const captureCoverButton = document.getElementById('capture-cover-button');
+    const coverScanCancelButton = document.getElementById('cover-scan-cancel-button');
+    const coverScanStatus = document.getElementById('cover-scan-status');
+
     let currentFallbackISBN = ''; // Stores the ISBN that failed initial lookup
+    let coverStream = null; // To hold the stream for the cover scanner
+    let isScanning = false; // To track barcode scanner state
+    let isBarcodeScanFlow = false; // To track if the flow started with a barcode scan
 
     // --- Utility Functions ---
+
+    function stopScanning() {
+        codeReader.reset();
+        isScanning = false;
+        toggleScanButton.textContent = 'Start Barcode Scan';
+        toggleScanButton.classList.remove('bg-red-600', 'hover:bg-red-700');
+        toggleScanButton.classList.add('bg-blue-600', 'hover:bg-blue-700');
+        updateStatus('Scanner stopped.', false);
+    }
+
+
+    function stopCoverScanStream() {
+        if (coverStream) {
+            coverStream.getTracks().forEach(track => track.stop());
+            coverStream = null;
+            coverVideoElement.srcObject = null;
+        }
+    }
+
+
 
     function updateStatus(message, isScanning = true) {
       statusElement.textContent = message;
@@ -1135,9 +1312,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     
     function restartScannerAfterDelay(delay = 300) {
-        logResult('Processing complete. Restarting scan shortly...');
-        updateStatus(`Restarting scan in ${delay / 1000} seconds...`, false);
-        setTimeout(startScanning, delay); 
+        if (isBarcodeScanFlow) {
+            logResult('Processing complete. Restarting scan shortly...');
+            updateStatus(`Restarting scan in ${delay / 1000} seconds...`, false);
+            setTimeout(startScanning, delay);
+        } else {
+            logResult('Process complete. Ready for next action.');
+            updateStatus('Ready for next action.', false);
+        }
     }
     
     function showSelectionModal(options) {
@@ -1162,17 +1344,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         showModal(selectionModal, selectionModalContent);
     }
 
-    // --- Manual Search Handlers ---
-    
-    function showManualSearchModal(isbn) {
-        currentFallbackISBN = isbn;
-        document.getElementById('fallback-isbn').textContent = isbn;
-        manualSearchStatus.textContent = '';
-        document.getElementById('search-title').value = '';
-        document.getElementById('search-author').value = '';
-        
-        showModal(manualSearchModal, manualSearchModalContent);
+    // --- Cover Scan Handlers ---
+
+    function showCoverScanModal() {
+        hideModal(manualSearchModal, manualSearchModalContent);
+        showModal(coverScanModal, coverScanModalContent);
+        coverScanStatus.textContent = 'Starting camera...';
+
+        const selectedDeviceId = cameraSelect.value;
+        if (!selectedDeviceId) {
+            coverScanStatus.textContent = 'No camera selected.';
+            return;
+        }
+
+        const constraints = { video: { deviceId: { exact: selectedDeviceId } } };
+
+        navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+            coverStream = stream;
+            coverVideoElement.srcObject = stream;
+            coverVideoElement.play();
+            coverScanStatus.textContent = 'Position the cover and capture.';
+        }).catch(err => {
+            console.error('Cover scan camera error:', err);
+            coverScanStatus.textContent = `Error starting camera: ${err.message}`;
+        });
     }
+
+    async function handleCoverCapture() {
+        captureCoverButton.disabled = true;
+        captureCoverButton.textContent = 'Analyzing...';
+        coverScanStatus.textContent = 'Capturing image and sending to server...';
+
+        const canvas = document.createElement('canvas');
+        canvas.width = coverVideoElement.videoWidth;
+        canvas.height = coverVideoElement.videoHeight;
+        const context = canvas.getContext('2d');
+        context.drawImage(coverVideoElement, 0, 0, canvas.width, canvas.height);
+
+        const imageDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+
+        try {
+            logResult('Attempting cover analysis with Gemini...');
+            const response = await fetch('index.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'gemini_cover_search',
+                    image_data: imageDataUrl,
+                    isbn_fallback: currentFallbackISBN
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success && data.requires_selection) {
+                hideModal(coverScanModal, coverScanModalContent);
+                showSelectionModal(data.options);
+            } else if (data.success && data.requires_confirmation) {
+                hideModal(coverScanModal, coverScanModalContent);
+                showConfirmationModal(data.metadata);
+            } else {
+                coverScanStatus.textContent = data.message || 'Analysis failed. Please try again or enter manually.';
+            }
+
+        } catch (error) {
+            console.error('Cover scan analysis error:', error);
+            coverScanStatus.textContent = 'A network error occurred during analysis.';
+        } finally {
+            captureCoverButton.disabled = false;
+            captureCoverButton.textContent = 'Capture & Analyze';
+            stopCoverScanStream();
+        }
+    }
+
+
+        // --- Manual Search Handlers ---
+        function showManualSearchModal(isbn = null) {
+            const fallbackContainer = document.getElementById('manual-search-modal-content').querySelector('p');
+            if (isbn) {
+                currentFallbackISBN = isbn;
+                document.getElementById('fallback-isbn').textContent = isbn;
+                fallbackContainer.style.display = 'block';
+            } else {
+                currentFallbackISBN = '';
+                fallbackContainer.style.display = 'none';
+            }
+    
+            manualSearchStatus.textContent = '';
+            document.getElementById('search-title').value = '';
+            document.getElementById('search-author').value = '';
+            
+            showModal(manualSearchModal, manualSearchModalContent);
+        }
     
     async function handleManualSearch(event) {
         event.preventDefault();
@@ -1326,17 +1589,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     // --- Scanning Logic ---
 
+    function toggleScanning() {
+        if (isScanning) {
+            stopScanning();
+        } else {
+            startScanning();
+        }
+    }
+
     function startScanning() {
+      isBarcodeScanFlow = true;
       const selectedDeviceId = cameraSelect.value;
       if (!selectedDeviceId) {
           updateStatus('No camera selected.', false);
           return;
       }
       
+      isScanning = true;
+      toggleScanButton.textContent = 'Stop Barcode Scan';
+      toggleScanButton.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+      toggleScanButton.classList.add('bg-red-600', 'hover:bg-red-700');
+
       codeReader.decodeFromVideoDevice(selectedDeviceId, 'video', async (result, err) => {
         if (result) {
           // **STEP 1: Stop scanning on successful read**
-          codeReader.reset();
+          stopScanning();
           const isbn = result.text;
           logResult(`Barcode found: ${isbn}`);
 
@@ -1349,12 +1626,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           console.error(err)
           updateStatus('Error during scanning.');
           logResult(`Scanning Error: ${err.message || 'Unknown error'}`);
+          stopScanning(); // Stop on error
         }
       });
       updateStatus('Scanning for ISBN barcode...', true);
       logResult(`Started continuous decode from camera with id ${selectedDeviceId}`);
-      startButton.textContent = 'Scanning...';
-      startButton.disabled = true;
     }
 
 
@@ -1391,20 +1667,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           if (videoInputDevices.length > 0) {
             selectedDeviceId = preferredDeviceId;
             cameraSelect.value = selectedDeviceId; // Set the preferred device in the dropdown
-            updateStatus('Ready to scan. Select a camera if needed.', false);
-            startButton.disabled = false;
-            startButton.textContent = 'Start Scanning';
+            updateStatus('Ready for action. Select a function below.', false);
+            toggleScanButton.disabled = false;
           } else {
             updateStatus('No video input devices found.', false);
           }
 
           // 2. Set up event listeners
-          startButton.addEventListener('click', startScanning);
+          toggleScanButton.addEventListener('click', toggleScanning);
+          mainManualLookupButton.addEventListener('click', () => {
+              isBarcodeScanFlow = false;
+              showManualSearchModal();
+          });
+          mainScanCoverButton.addEventListener('click', () => {
+              isBarcodeScanFlow = false;
+              showCoverScanModal();
+          });
+
           cameraSelect.addEventListener('change', (e) => {
               selectedDeviceId = e.target.value;
-              // Reset and restart scanning immediately if the camera is changed while scanning
-              if (startButton.disabled) {
-                  codeReader.reset();
+              if (isScanning) {
+                  stopScanning();
                   startScanning();
               }
           });
@@ -1413,7 +1696,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           confirmButton.addEventListener('click', () => confirmCreation(currentMetadata));
           cancelButton.addEventListener('click', () => {
               hideModal(confirmationModal, confirmationModalContent);
-              restartScannerAfterDelay(100); // Quick restart after cancel
+              restartScannerAfterDelay(100);
           });
 
           manualEntryButton.addEventListener('click', () => {
@@ -1425,7 +1708,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           manualSearchForm.addEventListener('submit', handleManualSearch);
           manualCancelButton.addEventListener('click', () => {
               hideModal(manualSearchModal, manualSearchModalContent);
-              restartScannerAfterDelay(100); // Quick restart after cancel
+              restartScannerAfterDelay(100);
+          });
+
+          // Cover Scan Modal Listeners
+          showCoverScanButton.addEventListener('click', showCoverScanModal);
+          captureCoverButton.addEventListener('click', handleCoverCapture);
+          coverScanCancelButton.addEventListener('click', () => {
+              hideModal(coverScanModal, coverScanModalContent);
+              stopCoverScanStream();
+              restartScannerAfterDelay(100);
           });
 
           // Selection Modal Listener
@@ -1433,11 +1725,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               hideModal(selectionModal, selectionModalContent);
               restartScannerAfterDelay(100);
           });
-
-          // 3. Optional: Auto-start scanning if a device is available
-          if (selectedDeviceId) {
-             startScanning();
-          }
 
         })
         .catch((err) => {
