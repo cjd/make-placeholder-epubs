@@ -24,12 +24,15 @@ Before running the application, you need to create a `.env` file in the root of 
    touch .env
     ```
 
-2. **Add the Hardcover API Token:**
+2. **Add the configuration variables:**
 
-   Open the `.env` file and add the following line:
+   Open the `.env` file and add the following lines:
 
    ```.env
    HARDCOVER_BEARER_TOKEN="your_hardcover_bearer_token"
+   DEBUG_LOG_FILE=debug.log
+   EPUB_DIR=epubs/
+   ISBN_LIST_FILE=processed_isbns.txt
    ```
 
    Replace `"your_hardcover_bearer_token"` with your actual Hardcover API bearer token.
