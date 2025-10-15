@@ -144,6 +144,7 @@ function get_hardcover_metadata($identifier) {
                     'publisher' => $book_data['publisher'] ?? '',
                     'publishedDate' => $book_data['release_date'] ?? '',
                     'cover_url' => $book_data['image']['url'] ?? null,
+                    'source' => 'Hardcover'
                 ];
             }
             log_message("Hardcover success: Found " . count($results) . " book(s).");
@@ -176,6 +177,7 @@ function get_google_books_metadata($isbn) {
                 'publisher' => $item['publisher'] ?? '',
                 'publishedDate' => $item['publishedDate'] ?? '',
                 'cover_url' => $item['imageLinks']['extraLarge'] ?? $item['imageLinks']['large'] ?? $item['imageLinks']['thumbnail'] ?? null,
+                'source' => 'Google Books'
             ];
         } else {
             log_message("Google Books API: Book not found.", 'WARNING');
@@ -208,6 +210,7 @@ function get_open_library_metadata_by_title_author($title, $author) {
                     'publishedDate' => $book['first_publish_year'] ?? '',
                     'cover_url' => $cover_id ? "https://covers.openlibrary.org/b/id/{$cover_id}-L.jpg" : null,
                     'isbn' => $book['isbn'] ? $book['isbn'][0] : 'N/A',
+                    'source' => 'Open Library'
                 ];
             }
             log_message("Open Library success: Found " . count($results) . " book(s).");
@@ -254,6 +257,7 @@ function get_open_library_metadata($isbn) {
                 'publisher' => $book['publishers'][0]['name'] ?? '',
                 'publishedDate' => $book['publish_date'] ?? '',
                 'cover_url' => $cover_url,
+                'source' => 'Open Library'
             ];
         } else {
             log_message("Open Library API: Book not found.", 'WARNING');
@@ -342,6 +346,7 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
         }
 
     } else { // ISBN search
+        $hardcover_data = get_hardcover_metadata($identifier);
         $google_data = get_google_books_metadata($identifier);
         $open_library_data = get_open_library_metadata($identifier);
 
@@ -354,12 +359,16 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
             'publisher' => 'Publisher Not Found',
             'publishedDate' => 'N/A',
             'cover_url' => null,
+            'sources' => []
         ];
 
         $sources = array_filter([$hardcover_data ? $hardcover_data[0] : null, $google_data, $open_library_data]);
 
         // Prioritized consolidation: Hardcover > Google > Open Library
         foreach ($sources as $source) {
+            if (!in_array($source['source'], $metadata['sources'])) {
+                $metadata['sources'][] = $source['source'];
+            }
             // Overwrite if the current value is a placeholder or if the new value is better
             foreach ($source as $key => $value) {
                 if ($value && ($metadata[$key] === "Title Not Found" || 
@@ -382,6 +391,9 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
         } elseif ($hardcover_data && isset($hardcover_data[0]['cover_url']) && $hardcover_data[0]['cover_url']) {
             $metadata['cover_url'] = $hardcover_data[0]['cover_url'];
         }
+
+        $metadata['source'] = implode(', ', $metadata['sources']);
+        unset($metadata['sources']);
     }
 
     log_message("Final Consolidated Metadata: " . print_r($metadata, true));
@@ -1094,6 +1106,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <p class="text-sm text-gray-500 mb-6">
               ISBN: <span id="modal-isbn"></span>
           </p>
+          <p class="text-xs text-gray-500 mt-4">
+              Source: <span id="modal-source"></span>
+          </p>
           <div class="flex flex-wrap justify-center gap-4">
               <button id="confirm-button" 
                       class="bg-green-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-green-700 transition duration-150 ease-in-out shadow-md shadow-green-300">
@@ -1301,13 +1316,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }, 10);
     }
 
-    function hideModal(modal, content) {
+    function hideModal(modal, content, onHidden) {
         content.classList.remove('opacity-100', 'scale-100');
         content.classList.add('opacity-0', 'scale-95');
         // Hide completely after transition
         setTimeout(() => {
             modal.classList.remove('flex');
             modal.classList.add('hidden');
+            if (onHidden) onHidden();
         }, 300);
     }
     
@@ -1336,7 +1352,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <button class="mt-4 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-150 ease-in-out">Select</button>
             `;
             optionDiv.querySelector('button').addEventListener('click', () => {
-                hideModal(selectionModal, selectionModalContent);
+                hideModal(selectionModal, selectionModalContent, null);
                 showConfirmationModal(option);
             });
             selectionOptions.appendChild(optionDiv);
@@ -1347,7 +1363,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // --- Cover Scan Handlers ---
 
     function showCoverScanModal() {
-        hideModal(manualSearchModal, manualSearchModalContent);
+        const capturedImage = document.getElementById('captured-cover-image');
+        if (capturedImage) capturedImage.style.display = 'none';
+        coverVideoElement.style.display = 'block';
+
+        hideModal(manualSearchModal, manualSearchModalContent, null);
         showModal(coverScanModal, coverScanModalContent);
         coverScanStatus.textContent = 'Starting camera...';
 
@@ -1383,6 +1403,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         const imageDataUrl = canvas.toDataURL('image/jpeg', 0.9);
 
+        // Hide video and show captured image
+        coverVideoElement.style.display = 'none';
+        let capturedImage = document.getElementById('captured-cover-image');
+        if (!capturedImage) {
+            capturedImage = document.createElement('img');
+            capturedImage.id = 'captured-cover-image';
+            capturedImage.className = 'w-full h-auto display-block';
+            document.getElementById('cover-scanner-container').appendChild(capturedImage);
+        }
+        capturedImage.src = imageDataUrl;
+        capturedImage.style.display = 'block';
+
+        // Stop the camera stream now that we have the image
+        stopCoverScanStream();
+
         try {
             logResult('Attempting cover analysis with Gemini...');
             const response = await fetch('index.php', {
@@ -1398,10 +1433,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             const data = await response.json();
 
             if (data.success && data.requires_selection) {
-                hideModal(coverScanModal, coverScanModalContent);
+                hideModal(coverScanModal, coverScanModalContent, null);
                 showSelectionModal(data.options);
             } else if (data.success && data.requires_confirmation) {
-                hideModal(coverScanModal, coverScanModalContent);
+                hideModal(coverScanModal, coverScanModalContent, null);
                 showConfirmationModal(data.metadata);
             } else {
                 coverScanStatus.textContent = data.message || 'Analysis failed. Please try again or enter manually.';
@@ -1413,7 +1448,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } finally {
             captureCoverButton.disabled = false;
             captureCoverButton.textContent = 'Capture & Analyze';
-            stopCoverScanStream();
+            // Stream is already stopped, no need to call it again here.
         }
     }
 
@@ -1469,11 +1504,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             const data = await response.json();
             
             if (data.success && data.requires_selection) {
-                hideModal(manualSearchModal, manualSearchModalContent);
+                hideModal(manualSearchModal, manualSearchModalContent, null);
                 showSelectionModal(data.options);
             } else if (data.success && data.requires_confirmation) {
                 // Manually found data is confirmed via the standard modal
-                hideModal(manualSearchModal, manualSearchModalContent);
+                hideModal(manualSearchModal, manualSearchModalContent, null);
                 showConfirmationModal(data.metadata);
             } else {
                 manualSearchStatus.textContent = data.message || 'Manual search failed. Try different keywords.';
@@ -1553,7 +1588,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             logResult(`NETWORK ERROR during generation: ${error.message}`);
             console.error('Generation Error:', error);
         } finally {
-            hideModal(confirmationModal, confirmationModalContent);
+            hideModal(confirmationModal, confirmationModalContent, null);
             confirmButton.disabled = false;
             confirmButton.textContent = 'Generate EPUB';
             restartScannerAfterDelay();
@@ -1566,6 +1601,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       document.getElementById('modal-title').textContent = metadata.title;
       document.getElementById('modal-author').textContent = metadata.author;
       document.getElementById('modal-isbn').textContent = metadata.isbn;
+      document.getElementById('modal-source').textContent = metadata.source;
 
       const subtitleContainer = document.getElementById('modal-subtitle-container');
       const subtitleElement = document.getElementById('modal-subtitle');
@@ -1695,19 +1731,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           // Confirmation Modal Listeners
           confirmButton.addEventListener('click', () => confirmCreation(currentMetadata));
           cancelButton.addEventListener('click', () => {
-              hideModal(confirmationModal, confirmationModalContent);
+              hideModal(confirmationModal, confirmationModalContent, null);
               restartScannerAfterDelay(100);
           });
 
           manualEntryButton.addEventListener('click', () => {
-              hideModal(confirmationModal, confirmationModalContent);
+              hideModal(confirmationModal, confirmationModalContent, null);
               showManualSearchModal(currentMetadata.isbn);
           });
           
           // Manual Search Modal Listeners
           manualSearchForm.addEventListener('submit', handleManualSearch);
           manualCancelButton.addEventListener('click', () => {
-              hideModal(manualSearchModal, manualSearchModalContent);
+              hideModal(manualSearchModal, manualSearchModalContent, null);
               restartScannerAfterDelay(100);
           });
 
@@ -1715,14 +1751,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           showCoverScanButton.addEventListener('click', showCoverScanModal);
           captureCoverButton.addEventListener('click', handleCoverCapture);
           coverScanCancelButton.addEventListener('click', () => {
-              hideModal(coverScanModal, coverScanModalContent);
-              stopCoverScanStream();
-              restartScannerAfterDelay(100);
+              hideModal(coverScanModal, coverScanModalContent, () => {
+                  stopCoverScanStream();
+                  const capturedImage = document.getElementById('captured-cover-image');
+                  if (capturedImage) capturedImage.style.display = 'none';
+                  coverVideoElement.style.display = 'block';
+                  restartScannerAfterDelay(100);
+              });
           });
 
           // Selection Modal Listener
           selectionCancelButton.addEventListener('click', () => {
-              hideModal(selectionModal, selectionModalContent);
+              hideModal(selectionModal, selectionModalContent, null);
               restartScannerAfterDelay(100);
           });
 
