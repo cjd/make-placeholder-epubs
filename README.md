@@ -13,6 +13,7 @@ Note that since this is just creating placeholder epub files you are not limited
 * **Barcode Scanning:** Uses your device's camera to scan ISBN barcodes directly in the browser.
 * **Metadata Fetching:** Retrieves book information (title, subtitle, author, description, etc.) from Hardcover, Google Books, and Open Library.
 * **Manual Search:** If an ISBN is not found, you can search for the book manually by title and author. The app will query both the Hardcover and Open Library APIs.
+* **Gemini Vision Search:** You can also take a photo of the book cover and Gemini will try to determine the title/author from that image.  If no match is found after that you can generate a book using the cover photo+title+author (good for books that don't exist in any of the metadata sources)
 * **EPUB Generation:** Creates a simple `.epub` file with the fetched metadata and a cover image.
 * **Web Interface:** Provides a user-friendly interface for scanning and generating EPUBs.
 
