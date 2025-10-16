@@ -334,7 +334,7 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
         $hardcover_data = get_hardcover_metadata("$title $author");
         $open_library_data = get_open_library_metadata_by_title_author($title, $author);
 
-        $all_results = array_merge($hardcover_data ?: [], $open_library_data ?: []);
+        $all_results = array_merge($open_library_data ?: [], $hardcover_data ?: []);
 
         if (count($all_results) > 1) {
             return ['multiple_options' => $all_results];
@@ -362,9 +362,9 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
             'sources' => []
         ];
 
-        $sources = array_filter([$hardcover_data ? $hardcover_data[0] : null, $google_data, $open_library_data]);
+        $sources = array_filter([$open_library_data, $google_data, $hardcover_data ? $hardcover_data[0] : null]);
 
-        // Prioritized consolidation: Hardcover > Google > Open Library
+        // Prioritized consolidation: Open Library > Google > Hardcover
         foreach ($sources as $source) {
             if (!in_array($source['source'], $metadata['sources'])) {
                 $metadata['sources'][] = $source['source'];
@@ -384,10 +384,10 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
         }
         
         // Final cover check
-        if ($google_data && isset($google_data['cover_url']) && $google_data['cover_url']) {
-            $metadata['cover_url'] = $google_data['cover_url'];
-        } elseif ($open_library_data && isset($open_library_data['cover_url']) && $open_library_data['cover_url']) {
+        if ($open_library_data && isset($open_library_data['cover_url']) && $open_library_data['cover_url']) {
             $metadata['cover_url'] = $open_library_data['cover_url'];
+        } elseif ($google_data && isset($google_data['cover_url']) && $google_data['cover_url']) {
+            $metadata['cover_url'] = $google_data['cover_url'];
         } elseif ($hardcover_data && isset($hardcover_data[0]['cover_url']) && $hardcover_data[0]['cover_url']) {
             $metadata['cover_url'] = $hardcover_data[0]['cover_url'];
         }
