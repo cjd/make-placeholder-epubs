@@ -607,35 +607,34 @@ function download_file($url) {
         log_message("Downloaded file is an image ($mime_type). Attempting conversion to JPEG.");
         
         $image = false;
-        if ($mime_type === 'image/jpeg' || $mime_type === 'image/jpg') {
+        // Temporarily suppress errors to handle them manually
+        $previous_error_handler = set_error_handler(function($errno, $errstr) {
+            log_message("Caught GD Error: $errstr", 'ERROR');
+        });
+        
+        try {
             $image = imagecreatefromstring($content);
-        } elseif ($mime_type === 'image/png') {
-            $image = imagecreatefrompng($content);
-        } elseif ($mime_type === 'image/gif') {
-            $image = imagecreatefromgif($content);
-        } elseif ($mime_type === 'image/webp') {
-             // Check for WebP support
-             if (function_exists('imagecreatefromwebp')) {
-                 $image = imagecreatefromwebp($content);
-             } else {
-                 log_message("GD WebP support is missing. Skipping conversion.", 'WARNING');
-                 // Fallback: If WebP can't be read, try to treat it as-is (might fail EPUB validation)
-                 return ['content' => $content, 'mime' => $mime_type];
-             }
+        } catch (Exception $e) {
+            log_message("An exception occurred during image creation: " . $e->getMessage(), 'ERROR');
+            $image = false;
+        } finally {
+            restore_error_handler();
         }
 
         if ($image !== false) {
-            // Use output buffering to capture the JPEG data
             ob_start();
-            // Convert and output to buffer (quality 85)
-            imagejpeg($image, null, 85);
+            $jpeg_success = imagejpeg($image, null, 85);
             $jpeg_content = ob_get_clean();
             imagedestroy($image);
             
-            log_message("Image successfully converted to JPEG.");
-            return ['content' => $jpeg_content, 'mime' => 'image/jpeg'];
+            if ($jpeg_success && $jpeg_content) {
+                log_message("Image successfully converted to JPEG.");
+                return ['content' => $jpeg_content, 'mime' => 'image/jpeg'];
+            } else {
+                log_message("imagejpeg failed to produce content.", 'ERROR');
+            }
         } else {
-            log_message("Could not create image resource for conversion. Using raw content.", 'WARNING');
+            log_message("Could not create image resource for conversion. The image may be corrupt or in an unsupported format.", 'ERROR');
         }
     } else {
         log_message("Downloaded file is not a supported image format or GD is not available ($mime_type). Using raw content.", 'WARNING');
