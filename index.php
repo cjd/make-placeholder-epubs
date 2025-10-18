@@ -285,7 +285,7 @@ function get_gemini_cover_suggestion($base64_image_data) {
             [
                 'parts' => [
                     [
-                        'text' => "Analyze the image, which contains a book cover. Identify the book's title and author. Respond with a single, clean JSON object with two keys: 'title' and 'author'. For example: {\"title\": \"The Hobbit\", \"author\": \"J.R.R. Tolkien\"}."
+                        'text' => "Analyze the image, which contains a book cover. Identify the book's title and author. If the title or author cannot be determined, return an empty string for that value. Respond with a single, clean JSON object with two keys: 'title' and 'author'. For example: {\"title\": \"The Hobbit\", \"author\": \"J.R.R. Tolkien\"}."
                     ],
                     [
                         'inline_data' => [
@@ -346,7 +346,6 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
         }
 
     } else { // ISBN search
-        $hardcover_data = get_hardcover_metadata($identifier);
         $google_data = get_google_books_metadata($identifier);
         $open_library_data = get_open_library_metadata($identifier);
 
@@ -362,9 +361,9 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
             'sources' => []
         ];
 
-        $sources = array_filter([$open_library_data, $google_data, $hardcover_data ? $hardcover_data[0] : null]);
+        $sources = array_filter([$open_library_data, $google_data]);
 
-        // Prioritized consolidation: Open Library > Google > Hardcover
+        // Prioritized consolidation: Open Library > Google
         foreach ($sources as $source) {
             if (!in_array($source['source'], $metadata['sources'])) {
                 $metadata['sources'][] = $source['source'];
@@ -388,8 +387,6 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
             $metadata['cover_url'] = $open_library_data['cover_url'];
         } elseif ($google_data && isset($google_data['cover_url']) && $google_data['cover_url']) {
             $metadata['cover_url'] = $google_data['cover_url'];
-        } elseif ($hardcover_data && isset($hardcover_data[0]['cover_url']) && $hardcover_data[0]['cover_url']) {
-            $metadata['cover_url'] = $hardcover_data[0]['cover_url'];
         }
 
         $metadata['source'] = implode(', ', $metadata['sources']);
@@ -804,23 +801,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             $gemini_suggestion = get_gemini_cover_suggestion($image_data);
 
-            $options = [];
-            if ($gemini_suggestion && !empty($gemini_suggestion['title']) && !empty($gemini_suggestion['author'])) {
+            if ($gemini_suggestion) {
                 $gemini_suggestion['source'] = 'Gemini Vision';
-                $options[] = $gemini_suggestion;
 
-                $metadata = get_book_metadata($gemini_suggestion['title'], 'TITLE_AUTHOR', $gemini_suggestion['author']);
-                if ($metadata) {
-                    if (isset($metadata['multiple_options'])) {
-                        $options = array_merge($options, $metadata['multiple_options']);
-                    } else {
-                        $options[] = $metadata;
+                if (empty($gemini_suggestion['title']) || empty($gemini_suggestion['author'])) {
+                    // If title or author is missing, go straight to confirmation for editing.
+                    echo json_encode(['success' => true, 'requires_confirmation' => true, 'metadata' => $gemini_suggestion]);
+                } else {
+                    // If both are present, proceed with the selection logic.
+                    $options = [];
+                    $options[] = $gemini_suggestion;
+
+                    $metadata = get_book_metadata($gemini_suggestion['title'], 'TITLE_AUTHOR', $gemini_suggestion['author']);
+                    if ($metadata) {
+                        if (isset($metadata['multiple_options'])) {
+                            $options = array_merge($options, $metadata['multiple_options']);
+                        } else {
+                            $options[] = $metadata;
+                        }
                     }
+                    echo json_encode(['success' => true, 'requires_selection' => true, 'options' => $options]);
                 }
-            }
-
-            if (count($options) > 0) {
-                echo json_encode(['success' => true, 'requires_selection' => true, 'options' => $options]);
             } else {
                 echo json_encode(['success' => false, 'message' => 'Could not identify book from cover. Please try manual entry.']);
             }
@@ -1105,15 +1106,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               Confirm Book Details
           </h3>
           <img id="modal-cover" class="cover-image mx-auto mb-4" alt="Book Cover">
-          <p class="text-gray-700 mb-2">
-              <span class="font-semibold">Title:</span> <span id="modal-title"></span>
-          </p>
-          <p class="text-gray-600 mb-2" id="modal-subtitle-container" style="display: none;">
-              <span class="font-semibold">Subtitle:</span> <span id="modal-subtitle"></span>
-          </p>
-          <p class="text-gray-700 mb-4">
-              <span class="font-semibold">Author:</span> <span id="modal-author"></span>
-          </p>
+          <div class="text-left">
+            <label for="modal-title-input" class="font-semibold">Title:</label>
+            <input type="text" id="modal-title-input" class="w-full p-2 border border-gray-300 rounded-lg">
+          </div>
+          <div class="text-left mt-2">
+            <label for="modal-author-input" class="font-semibold">Author:</label>
+            <input type="text" id="modal-author-input" class="w-full p-2 border border-gray-300 rounded-lg">
+          </div>
+          <div class="text-left mt-2" id="modal-subtitle-container" style="display: none;">
+            <label for="modal-subtitle-input" class="font-semibold">Subtitle:</label>
+            <input type="text" id="modal-subtitle-input" class="w-full p-2 border border-gray-300 rounded-lg">
+          </div>
           <p class="text-sm text-gray-500 mb-6">
               ISBN: <span id="modal-isbn"></span>
           </p>
@@ -1393,7 +1397,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             return;
         }
 
-        const constraints = { video: { deviceId: { exact: selectedDeviceId } } };
+        const constraints = { video: { deviceId: selectedDeviceId } };
 
         navigator.mediaDevices.getUserMedia(constraints).then(stream => {
             coverStream = stream;
@@ -1451,6 +1455,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (data.success && data.requires_selection) {
                 hideModal(coverScanModal, coverScanModalContent, () => {
                     showSelectionModal(data.options);
+                });
+            } else if (data.success && data.requires_confirmation) {
+                hideModal(coverScanModal, coverScanModalContent, () => {
+                    showConfirmationModal(data.metadata);
                 });
             } else {
                 coverScanStatus.textContent = data.message || 'Analysis failed. Please try again or enter manually.';
@@ -1577,15 +1585,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     
     async function confirmCreation(metadata) {
+        const updatedMetadata = { ...metadata };
+        updatedMetadata.title = document.getElementById('modal-title-input').value.trim();
+        updatedMetadata.author = document.getElementById('modal-author-input').value.trim();
+        updatedMetadata.subtitle = document.getElementById('modal-subtitle-input').value.trim();
+
         confirmButton.disabled = true;
         confirmButton.textContent = 'Generating...';
-        logResult(`Confirmation received. Generating EPUB for ${metadata.title}...`);
+        logResult(`Confirmation received. Generating EPUB for ${updatedMetadata.title}...`);
 
         try {
             const response = await fetch('index.php', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'confirm_epub_creation', metadata: metadata })
+                body: JSON.stringify({ action: 'confirm_epub_creation', metadata: updatedMetadata })
             });
 
             const data = await response.json();
@@ -1612,17 +1625,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     function showConfirmationModal(metadata) {
       currentMetadata = metadata;
       
-      document.getElementById('modal-title').textContent = metadata.title;
-      document.getElementById('modal-author').textContent = metadata.author;
-      document.getElementById('modal-isbn').textContent = metadata.isbn;
+      document.getElementById('modal-title-input').value = metadata.title || '';
+      document.getElementById('modal-author-input').value = metadata.author || '';
+      document.getElementById('modal-isbn').textContent = metadata.isbn || '';
       document.getElementById('modal-source').textContent = metadata.source;
 
       const subtitleContainer = document.getElementById('modal-subtitle-container');
-      const subtitleElement = document.getElementById('modal-subtitle');
+      const subtitleInput = document.getElementById('modal-subtitle-input');
       if (metadata.subtitle) {
-          subtitleElement.textContent = metadata.subtitle;
+          subtitleInput.value = metadata.subtitle;
           subtitleContainer.style.display = 'block';
       } else {
+          subtitleInput.value = '';
           subtitleContainer.style.display = 'none';
       }
       
@@ -1660,7 +1674,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       toggleScanButton.classList.remove('bg-blue-600', 'hover:bg-blue-700');
       toggleScanButton.classList.add('bg-red-600', 'hover:bg-red-700');
 
-      codeReader.decodeFromVideoDevice(selectedDeviceId, 'video', async (result, err) => {
+      const constraints = { video: { deviceId: selectedDeviceId } };
+      codeReader.decodeFromConstraints(constraints, 'video', async (result, err) => {
         if (result) {
           // **STEP 1: Stop scanning on successful read**
           stopScanning();
@@ -1692,19 +1707,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .then((videoInputDevices) => {
           
           let preferredDeviceId = null;
-          
-          // Fallback to the first device found
-          if (videoInputDevices.length > 0) {
-              preferredDeviceId = videoInputDevices[0].deviceId;
-          }
 
           // **PRIORITY LOGIC: Check for 'back' or 'environment' to select rear camera**
-          videoInputDevices.forEach(device => {
+          const rearCamera = videoInputDevices.find(device => {
               const label = device.label.toLowerCase();
-              if (label.includes('back') || label.includes('environment')) {
-                  preferredDeviceId = device.deviceId;
-              }
+              return label.includes('back') || label.includes('environment');
           });
+
+          if (rearCamera) {
+              preferredDeviceId = rearCamera.deviceId;
+          } else if (videoInputDevices.length > 0) {
+              // Fallback to the first device found
+              preferredDeviceId = videoInputDevices[0].deviceId;
+          }
 
           // Populate the camera selection dropdown
           videoInputDevices.forEach(device => {
