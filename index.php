@@ -1107,9 +1107,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <label for="modal-subtitle-input" class="font-semibold">Subtitle:</label>
             <input type="text" id="modal-subtitle-input" class="w-full p-2 border border-gray-300 rounded-lg">
           </div>
-          <p class="text-sm text-gray-500 mb-6">
-              ISBN: <span id="modal-isbn"></span>
-          </p>
+          <div class="text-left mt-2">
+            <label for="modal-isbn-input" class="font-semibold">ISBN:</label>
+            <input type="text" id="modal-isbn-input" class="w-full p-2 border border-gray-300 rounded-lg">
+          </div>
           <p class="text-xs text-gray-500 mt-4">
               Source: <span id="modal-source"></span>
           </p>
@@ -1121,6 +1122,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               <button id="manual-entry-button"
                       class="bg-yellow-500 text-white font-semibold py-3 px-6 rounded-lg hover:bg-yellow-600 transition duration-150 ease-in-out shadow-md shadow-yellow-300">
                   Not right? Enter manually
+              </button>
+              <button id="search-again-button"
+                      class="bg-blue-500 text-white font-semibold py-3 px-6 rounded-lg hover:bg-blue-600 transition duration-150 ease-in-out shadow-md shadow-blue-300">
+                  Search Again
               </button>
               <button id="cancel-button" 
                       class="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg hover:bg-gray-400 transition duration-150 ease-in-out">
@@ -1174,12 +1179,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <form id="manual-search-form" class="space-y-4">
               <div>
                   <label for="search-title" class="block text-left text-sm font-medium text-gray-700 mb-1">Title</label>
-                  <input type="text" id="search-title" required
+                  <input type="text" id="search-title" 
                          class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
               </div>
               <div>
                   <label for="search-author" class="block text-left text-sm font-medium text-gray-700 mb-1">Author</label>
-                  <input type="text" id="search-author" required
+                  <input type="text" id="search-author" 
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+              </div>
+              <div>
+                  <label for="search-isbn" class="block text-left text-sm font-medium text-gray-700 mb-1">ISBN (Optional)</label>
+                  <input type="text" id="search-isbn"
                          class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
               </div>
               <button type="submit" id="manual-search-button"
@@ -1252,6 +1262,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     const confirmButton = document.getElementById('confirm-button');
     const cancelButton = document.getElementById('cancel-button');
     const manualEntryButton = document.getElementById('manual-entry-button');
+    const searchAgainButton = document.getElementById('search-again-button');
     const manualSearchForm = document.getElementById('manual-search-form');
     const manualCancelButton = document.getElementById('manual-cancel-button');
     const manualSearchButton = document.getElementById('manual-search-button');
@@ -1479,6 +1490,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             manualSearchStatus.textContent = '';
             document.getElementById('search-title').value = '';
             document.getElementById('search-author').value = '';
+            document.getElementById('search-isbn').value = isbn || '';
 
             showModal(manualSearchModal, manualSearchModalContent);
         }
@@ -1491,44 +1503,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         const title = document.getElementById('search-title').value.trim();
         const author = document.getElementById('search-author').value.trim();
+        const isbn = document.getElementById('search-isbn').value.trim();
 
-        if (!title || !author) {
-            manualSearchStatus.textContent = 'Please enter both a Title and an Author.';
-            manualSearchButton.disabled = false;
-            manualSearchButton.textContent = 'Search Manually';
-            return;
-        }
-
-        try {
+        if (isbn) {
+            logResult(`Attempting manual search for ISBN: ${isbn}`);
+            hideModal(manualSearchModal, manualSearchModalContent, null);
+            await processISBNOnServer(isbn);
+        } else if (title && author) {
             logResult(`Attempting manual search for: ${title} by ${author}`);
-            const response = await fetch('index.php', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'manual_search',
-                    title: title,
-                    author: author,
-                    isbn_fallback: currentFallbackISBN 
-                })
-            });
+            try {
+                const response = await fetch('index.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: 'manual_search',
+                        title: title,
+                        author: author,
+                        isbn_fallback: currentFallbackISBN
+                    })
+                });
 
-            const data = await response.json();
+                const data = await response.json();
 
-            if (data.success && data.requires_selection) {
-                hideModal(manualSearchModal, manualSearchModalContent, null);
-                showSelectionModal(data.options);
-            } else if (data.success && data.requires_confirmation) {
-                // Manually found data is confirmed via the standard modal
-                hideModal(manualSearchModal, manualSearchModalContent, null);
-                showConfirmationModal(data.metadata);
-            } else {
-                manualSearchStatus.textContent = data.message || 'Manual search failed. Try different keywords.';
+                if (data.success && data.requires_selection) {
+                    hideModal(manualSearchModal, manualSearchModalContent, null);
+                    showSelectionModal(data.options);
+                } else if (data.success && data.requires_confirmation) {
+                    hideModal(manualSearchModal, manualSearchModalContent, null);
+                    showConfirmationModal(data.metadata);
+                } else {
+                    manualSearchStatus.textContent = data.message || 'Manual search failed. Try different keywords.';
+                }
+
+            } catch (error) {
+                console.error('Manual search error:', error);
+                manualSearchStatus.textContent = 'A network error occurred during manual search.';
+            } finally {
+                manualSearchButton.disabled = false;
+                manualSearchButton.textContent = 'Search Manually';
             }
-
-        } catch (error) {
-            console.error('Manual search error:', error);
-            manualSearchStatus.textContent = 'An network error occurred during manual search.';
-        } finally {
+        } else {
+            manualSearchStatus.textContent = 'Please enter an ISBN or both a Title and an Author.';
             manualSearchButton.disabled = false;
             manualSearchButton.textContent = 'Search Manually';
         }
@@ -1578,6 +1593,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         updatedMetadata.title = document.getElementById('modal-title-input').value.trim();
         updatedMetadata.author = document.getElementById('modal-author-input').value.trim();
         updatedMetadata.subtitle = document.getElementById('modal-subtitle-input').value.trim();
+        updatedMetadata.isbn = document.getElementById('modal-isbn-input').value.trim();
 
         confirmButton.disabled = true;
         confirmButton.textContent = 'Generating...';
@@ -1611,12 +1627,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    async function handleSearchAgain() {
+        const title = document.getElementById('modal-title-input').value.trim();
+        const author = document.getElementById('modal-author-input').value.trim();
+        const isbn = document.getElementById('modal-isbn-input').value.trim();
+
+        hideModal(confirmationModal, confirmationModalContent, null);
+
+        if (isbn) {
+            await processISBNOnServer(isbn);
+        } else if (title && author) {
+            // We need to manually trigger the manual search logic
+            // This is a simplified version of handleManualSearch
+            logResult(`Attempting manual search for: ${title} by ${author}`);
+            try {
+                const response = await fetch('index.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: 'manual_search',
+                        title: title,
+                        author: author,
+                        isbn_fallback: currentFallbackISBN
+                    })
+                });
+                const data = await response.json();
+                if (data.success && data.requires_selection) {
+                    showSelectionModal(data.options);
+                } else if (data.success && data.requires_confirmation) {
+                    showConfirmationModal(data.metadata);
+                } else {
+                    logResult(`ERROR: ${data.message || 'Unknown server error.'}`);
+                    restartScannerAfterDelay();
+                }
+            } catch (error) {
+                logResult(`NETWORK ERROR: ${error.message}. Restarting scan.`);
+                console.error('Network Error:', error);
+                restartScannerAfterDelay();
+            }
+        } else {
+            logResult('Not enough information to search again. Please provide an ISBN or both a title and an author.');
+            restartScannerAfterDelay();
+        }
+    }
+
     function showConfirmationModal(metadata) {
       currentMetadata = metadata;
 
       document.getElementById('modal-title-input').value = metadata.title || '';
       document.getElementById('modal-author-input').value = metadata.author || '';
-      document.getElementById('modal-isbn').textContent = metadata.isbn || '';
+      document.getElementById('modal-isbn-input').value = metadata.isbn || '';
       document.getElementById('modal-source').textContent = metadata.source;
 
       const subtitleContainer = document.getElementById('modal-subtitle-container');
@@ -1757,6 +1817,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               hideModal(confirmationModal, confirmationModalContent, null);
               showManualSearchModal(currentMetadata.isbn);
           });
+
+          searchAgainButton.addEventListener('click', handleSearchAgain);
 
           // Manual Search Modal Listeners
           manualSearchForm.addEventListener('submit', handleManualSearch);
