@@ -16,7 +16,8 @@ if (file_exists(__DIR__ . '/.env')) {
         if (strpos(trim($line), '#') === 0) continue;
         list($name, $value) = explode('=', $line, 2);
         $name = trim($name);
-        $value = trim($value);
+        // $value = trim($value);
+        $value = trim($value, '"\''); // Remove surrounding quotes
         if (!defined($name)) {
             define($name, $value);
         }
@@ -110,13 +111,20 @@ function fetch_url($url, $headers = [], $post_fields = null) {
 // --- Metadata Retrieval Functions (Hardcover - Priority Source) ---
 
 function get_hardcover_metadata($identifier) {
+    if (empty(HARDCOVER_BEARER_TOKEN)) {
+        log_message("Hardcover Bearer Token is not configured.", 'WARNING');
+        return null;
+    }
     log_message("Attempting to get metadata from Hardcover for $identifier");
     $query = 'query GetBookDetails($identifier: String!) { search(query: $identifier, query_type: "books") { results } }';
     $variables = ['identifier' => $identifier];
     $payload = json_encode(['query' => $query, 'variables' => $variables]);
     $headers = ['Content-Type: application/json', 'Authorization: ' . HARDCOVER_BEARER_TOKEN];
+  
+   
     $data = fetch_url(HARDCOVER_GRAPHQL_ENDPOINT, $headers, $payload);
 
+    
     if ($data) {
         $json = json_decode($data, true);
 
@@ -323,9 +331,13 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
         $title = $identifier;
         // Manual search now uses Hardcover and Open Library
         $hardcover_data = get_hardcover_metadata("$title $author");
+        $hardcover_data = !empty($hardcover_data) ? [$hardcover_data[0]] : [];
         $open_library_data = get_open_library_metadata_by_title_author($title, $author);
 
-        $all_results = array_merge($open_library_data ?: [], $hardcover_data ?: []);
+        $all_results = array_merge(
+            !empty($open_library_data) ? $open_library_data : [],
+            !empty($hardcover_data) ? $hardcover_data : []
+        );
 
         if (count($all_results) > 1) {
             return ['multiple_options' => $all_results];
@@ -337,6 +349,8 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
         }
 
     } else { // ISBN search
+        $hardcover_data = get_hardcover_metadata($identifier);
+        $hardcover_data = !empty($hardcover_data) ? $hardcover_data[0] : $hardcover_data; // convert array to single element for isbn search
         $google_data = get_google_books_metadata($identifier);
         $open_library_data = get_open_library_metadata($identifier);
 
@@ -351,9 +365,11 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
             'cover_url' => null,
             'sources' => []
         ];
-
-        $sources = array_filter([$open_library_data, $google_data]);
-
+   
+        $sources = array_values(array_filter([$hardcover_data, $open_library_data, $google_data], 
+            fn($data) => !empty($data)
+        ));
+   
         // Prioritized consolidation: Open Library > Google
         foreach ($sources as $source) {
             if (!in_array($source['source'], $metadata['sources'])) {
@@ -381,6 +397,8 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
             $metadata['cover_url'] = $open_library_data['cover_url'];
         } elseif ($google_data && isset($google_data['cover_url']) && $google_data['cover_url']) {
             $metadata['cover_url'] = $google_data['cover_url'];
+        } elseif ($hardcover_data && isset($hardcover_data['cover_url']) && $hardcover_data['cover_url']) {
+            $metadata['cover_url'] = $hardcover_data['cover_url'];
         }
 
         $metadata['source'] = implode(', ', $metadata['sources']);
