@@ -361,6 +361,9 @@ function get_book_metadata($identifier, $type = 'ISBN', $author = null) {
             }
             // Overwrite if the current value is a placeholder or if the new value is better
             foreach ($source as $key => $value) {
+                if ($key === 'source') {
+                    continue;
+                }
                 if ($value && ($metadata[$key] === "Title Not Found" || 
                                $metadata[$key] === "Author Not Found" || 
                                $metadata[$key] === "No description available." ||
@@ -907,7 +910,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // --- ACTION 1 (Default): INITIAL ISBN SEARCH ---
 
-    $isbn = trim(filter_var($input['isbn'] ?? '', FILTER_SANITIZE_STRING));
+    // WRONG
+    //$isbn = trim(filter_var($input['isbn'] ?? '', FILTER_SANITIZE_STRING));
+
+    // FIX (PHP 8.1+ compatible)
+    $isbn = trim(htmlspecialchars($input['isbn'] ?? '', ENT_QUOTES, 'UTF-8'));
 
     try {
         if (!empty($isbn)) {
