@@ -16,7 +16,6 @@ if (file_exists(__DIR__ . '/.env')) {
         if (strpos(trim($line), '#') === 0) continue;
         list($name, $value) = explode('=', $line, 2);
         $name = trim($name);
-        // $value = trim($value);
         $value = trim($value, '"\''); // Remove surrounding quotes
         if (!defined($name)) {
             define($name, $value);
@@ -120,11 +119,8 @@ function get_hardcover_metadata($identifier) {
     $variables = ['identifier' => $identifier];
     $payload = json_encode(['query' => $query, 'variables' => $variables]);
     $headers = ['Content-Type: application/json', 'Authorization: ' . HARDCOVER_BEARER_TOKEN];
-  
-   
     $data = fetch_url(HARDCOVER_GRAPHQL_ENDPOINT, $headers, $payload);
 
-    
     if ($data) {
         $json = json_decode($data, true);
 
@@ -928,10 +924,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // --- ACTION 1 (Default): INITIAL ISBN SEARCH ---
 
-    // WRONG
-    //$isbn = trim(filter_var($input['isbn'] ?? '', FILTER_SANITIZE_STRING));
-
-    // FIX (PHP 8.1+ compatible)
     $isbn = trim(htmlspecialchars($input['isbn'] ?? '', ENT_QUOTES, 'UTF-8'));
 
     try {
