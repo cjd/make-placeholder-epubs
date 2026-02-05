@@ -204,11 +204,11 @@ function get_open_library_metadata_by_title_author($title, $author) {
                     'title' => $book['title'] ?? 'Unknown Title',
                     'subtitle' => $book['subtitle'] ?? '',
                     'author' => implode(' & ', $book['author_name'] ?? ['Unknown Author']),
-                    'description' => $book['first_sentence'] ? $book['first_sentence'][0] : '',
-                    'publisher' => $book['publisher'] ? $book['publisher'][0] : '',
+                    'description' => (isset($book['first_sentence']) && $book['first_sentence']) ? $book['first_sentence'][0] : '',
+                    'publisher' => (isset($book['publisher']) && $book['publisher']) ? $book['publisher'][0] : '',
                     'publishedDate' => $book['first_publish_year'] ?? '',
                     'cover_url' => $cover_id ? "https://covers.openlibrary.org/b/id/{$cover_id}-L.jpg" : null,
-                    'isbn' => $book['isbn'] ? $book['isbn'][0] : 'N/A',
+                    'isbn' => (isset($book['isbn']) && $book['isbn'])  ? $book['isbn'][0] : 'N/A',
                     'source' => 'Open Library'
                 ];
             }
@@ -842,8 +842,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // --- ACTION 3: MANUAL SEARCH (Fallback) ---
     if ($action === 'manual_search') {
-        $title = trim(filter_var($input['title'] ?? '', FILTER_SANITIZE_STRING));
-        $author = trim(filter_var($input['author'] ?? '', FILTER_SANITIZE_STRING));
+        $title = trim(preg_replace('/<[^>]*>/', '', $input['title'] ?? ''));
+        $author = trim(preg_replace('/<[^>]*>/', '', $input['author'] ?? ''));        
 
         log_message("Received Manual Search request for: title='$title', author='$author'");
 
