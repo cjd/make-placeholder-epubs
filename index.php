@@ -796,9 +796,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = json_decode(file_get_contents('php://input'), true);
     $action = $input['action'] ?? 'search'; 
 
-    log_message("Received action: $action");
-    log_message("Input data: " . print_r($input, true));
-
     // --- ACTION: GEMINI COVER SEARCH ---
     if ($action === 'gemini_cover_search') {
         $image_data = $input['image_data'] ?? null;
