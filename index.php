@@ -416,12 +416,12 @@ function create_opf_content($metadata, $cover_mime = 'image/jpeg') {
     $cover_mime = 'image/jpeg';
     $modified_date = substr($metadata['publishedDate'], 0, 10) ?: '2024-01-01';
 
-    $title = htmlspecialchars($metadata['title'], ENT_XML1, 'UTF-8');
+    $title = htmlspecialchars($metadata['title'] ?? 'Unknown Title', ENT_XML1, 'UTF-8');
     $subtitle = isset($metadata['subtitle']) && !empty($metadata['subtitle']) ? htmlspecialchars($metadata['subtitle'], ENT_XML1, 'UTF-8') : '';
-    $author = htmlspecialchars($metadata['author'], ENT_XML1, 'UTF-8');
-    $isbn = htmlspecialchars($metadata['isbn'], ENT_XML1, 'UTF-8');
-    $publisher = htmlspecialchars($metadata['publisher'], ENT_XML1, 'UTF-8');
-    $description = htmlspecialchars($metadata['description'], ENT_XML1, 'UTF-8');
+    $author = htmlspecialchars($metadata['author'] ?? 'Unknown Author', ENT_XML1, 'UTF-8');
+    $isbn = htmlspecialchars($metadata['isbn'] ?? 'N/A', ENT_XML1, 'UTF-8');
+    $publisher = htmlspecialchars($metadata['publisher'] ?? 'Unknown Publisher', ENT_XML1, 'UTF-8');
+    $description = htmlspecialchars($metadata['description'] ?? 'No description available.', ENT_XML1, 'UTF-8');
 
     $full_title = $title;
     if ($subtitle) {
