@@ -1522,13 +1522,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         const author = document.getElementById('search-author').value.trim();
         const isbn = document.getElementById('search-isbn').value.trim();
 
-        if (isbn) {
-            logResult(`Attempting manual search for ISBN: ${isbn}`);
-            hideModal(manualSearchModal, manualSearchModalContent, null);
-            await processISBNOnServer(isbn);
-        } else if (title && author) {
-            logResult(`Attempting manual search for: ${title} by ${author}`);
-            try {
+        try {
+            if (isbn) {
+                logResult(`Attempting manual search for ISBN: ${isbn}`);
+                hideModal(manualSearchModal, manualSearchModalContent, null);
+                await processISBNOnServer(isbn);
+            } else if (title && author) {
+                logResult(`Attempting manual search for: ${title} by ${author}`);
                 const response = await fetch('index.php', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1551,16 +1551,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     manualSearchStatus.textContent = data.message || 'Manual search failed. Try different keywords.';
                 }
-
-            } catch (error) {
-                console.error('Manual search error:', error);
-                manualSearchStatus.textContent = 'A network error occurred during manual search.';
-            } finally {
-                manualSearchButton.disabled = false;
-                manualSearchButton.textContent = 'Search Manually';
+            } else {
+                manualSearchStatus.textContent = 'Please enter an ISBN or both a Title and an Author.';
             }
-        } else {
-            manualSearchStatus.textContent = 'Please enter an ISBN or both a Title and an Author.';
+        } catch (error) {
+            console.error('Manual search error:', error);
+            manualSearchStatus.textContent = 'A network error occurred during manual search.';
+        } finally {
             manualSearchButton.disabled = false;
             manualSearchButton.textContent = 'Search Manually';
         }
