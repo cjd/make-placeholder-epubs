@@ -796,6 +796,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = json_decode(file_get_contents('php://input'), true);
     $action = $input['action'] ?? 'search'; 
 
+    log_message("Received action: $action");
+    log_message("Input data: " . print_r($input, true));
+
     // --- ACTION: GEMINI COVER SEARCH ---
     if ($action === 'gemini_cover_search') {
         $image_data = $input['image_data'] ?? null;
@@ -1083,6 +1086,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 class="bg-yellow-500 text-white font-semibold py-3 px-6 rounded-lg hover:bg-yellow-600 transition duration-150 ease-in-out shadow-md shadow-yellow-300">
             Manual Lookup
         </button>
+        <button id="main-manual-entry-button" 
+                class="bg-green-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-green-700 transition duration-150 ease-in-out shadow-md shadow-green-300">
+            Manual Entry
+        </button>
+    </div>
+
+    <div class="mt-4 grid grid-cols-1">
         <button id="main-scan-cover-button" 
                 class="bg-purple-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-purple-700 transition duration-150 ease-in-out shadow-md shadow-purple-300">
             Scan Cover
@@ -1136,7 +1146,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                       class="bg-green-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-green-700 transition duration-150 ease-in-out shadow-md shadow-green-300">
                   Generate EPUB
               </button>
-              <button id="manual-entry-button"
+              <button id="confirmation-manual-entry-button"
                       class="bg-yellow-500 text-white font-semibold py-3 px-6 rounded-lg hover:bg-yellow-600 transition duration-150 ease-in-out shadow-md shadow-yellow-300">
                   Not right? Enter manually
               </button>
@@ -1249,6 +1259,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       </div>
   </div>
 
+  <div id="manual-entry-modal" 
+       class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 hidden items-center justify-center p-4">
+      <div class="bg-white p-8 rounded-xl shadow-2xl max-w-md w-full text-center transform transition-all duration-300 scale-95 opacity-0"
+           id="manual-entry-modal-content">
+          <h3 class="text-2xl font-bold text-gray-800 mb-4">
+              Manual Entry & EPUB Generation
+          </h3>
+          <p class="text-gray-700 mb-6">
+              Enter the book details below to generate an EPUB file.
+          </p>
+
+          <form id="manual-entry-form" class="space-y-4">
+              <div>
+                  <label for="entry-title" class="block text-left text-sm font-medium text-gray-700 mb-1">Title *</label>
+                  <input type="text" id="entry-title" required
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+              </div>
+              <div>
+                  <label for="entry-author" class="block text-left text-sm font-medium text-gray-700 mb-1">Author *</label>
+                  <input type="text" id="entry-author" required
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+              </div>
+              <div>
+                  <label for="entry-isbn" class="block text-left text-sm font-medium text-gray-700 mb-1">ISBN (Optional)</label>
+                  <input type="text" id="entry-isbn"
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+              </div>
+              <div>
+                  <label for="entry-publisher" class="block text-left text-sm font-medium text-gray-700 mb-1">Publisher (Optional)</label>
+                  <input type="text" id="entry-publisher"
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+              </div>
+              <div>
+                  <label for="entry-published-date" class="block text-left text-sm font-medium text-gray-700 mb-1">Publication Year (Optional)</label>
+                  <input type="text" id="entry-published-date"
+                         class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="e.g., 2023">
+              </div>
+              <button type="submit" id="entry-generate-button"
+                      class="w-full bg-green-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-green-700 transition duration-150 ease-in-out shadow-md shadow-green-300">
+                  Generate EPUB
+              </button>
+              <button type="button" id="entry-cancel-button" 
+                      class="w-full bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg hover:bg-gray-400 transition duration-150 ease-in-out">
+                  Cancel
+              </button>
+          </form>
+          <div id="manual-entry-status" class="mt-4 text-sm text-red-600 font-medium"></div>
+      </div>
+  </div>
+
   <script>
     const ZXing = window.ZXing;
     const codeReader = new ZXing.BrowserMultiFormatReader();
@@ -1266,6 +1326,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     const toggleScanButton = document.getElementById('toggle-scan-button');
     const mainManualLookupButton = document.getElementById('main-manual-lookup-button');
     const mainScanCoverButton = document.getElementById('main-scan-cover-button');
+    const mainManualEntryButton = document.getElementById('main-manual-entry-button');
     
     // Modals and form elements
     const confirmationModal = document.getElementById('confirmation-modal');
@@ -1278,7 +1339,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     const selectionCancelButton = document.getElementById('selection-cancel-button');
     const confirmButton = document.getElementById('confirm-button');
     const cancelButton = document.getElementById('cancel-button');
-    const manualEntryButton = document.getElementById('manual-entry-button');
+    const confirmationManualEntryButton = document.getElementById('confirmation-manual-entry-button');
     const searchAgainButton = document.getElementById('search-again-button');
     const manualSearchForm = document.getElementById('manual-search-form');
     const manualCancelButton = document.getElementById('manual-cancel-button');
@@ -1293,6 +1354,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     const captureCoverButton = document.getElementById('capture-cover-button');
     const coverScanCancelButton = document.getElementById('cover-scan-cancel-button');
     const coverScanStatus = document.getElementById('cover-scan-status');
+
+    // Manual Entry Modal Elements
+    const manualEntryModal = document.getElementById('manual-entry-modal');
+    const manualEntryModalContent = document.getElementById('manual-entry-modal-content');
+    const manualEntryForm = document.getElementById('manual-entry-form');
+    const entryGenerateButton = document.getElementById('entry-generate-button');
+    const entryCancelButton = document.getElementById('entry-cancel-button');
+    const manualEntryStatus = document.getElementById('manual-entry-status');
 
     let currentFallbackISBN = ''; // Stores the ISBN that failed initial lookup
     let coverStream = null; // To hold the stream for the cover scanner
@@ -1563,6 +1632,83 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // Manual Entry Functions
+    function showManualEntryModal() {
+        // Clear form fields
+        document.getElementById('entry-title').value = '';
+        document.getElementById('entry-author').value = '';
+        document.getElementById('entry-isbn').value = '';
+        document.getElementById('entry-publisher').value = '';
+        document.getElementById('entry-published-date').value = '';
+        manualEntryStatus.textContent = '';
+        
+        // Show modal
+        showModal(manualEntryModal, manualEntryModalContent);
+    }
+
+    async function handleManualEntry(event) {
+        event.preventDefault();
+        
+        const title = document.getElementById('entry-title').value.trim();
+        const author = document.getElementById('entry-author').value.trim();
+        const isbn = document.getElementById('entry-isbn').value.trim();
+        const publisher = document.getElementById('entry-publisher').value.trim();
+        const publishedDate = document.getElementById('entry-published-date').value.trim();
+
+        // Validate required fields
+        if (!title || !author) {
+            manualEntryStatus.textContent = 'Title and Author are required.';
+            return;
+        }
+
+        try {
+            entryGenerateButton.disabled = true;
+            entryGenerateButton.textContent = 'Generating...';
+            manualEntryStatus.textContent = '';
+
+            // Create metadata object from manual entry
+            const metadata = {
+                title: title,
+                author: author,
+                isbn: isbn || null,
+                publisher: publisher || null,
+                publishedDate: publishedDate || null,
+                description: '',
+                coverUrl: null,
+                source: 'Manual Entry'
+            };
+
+            // Send to server for EPUB generation
+            const response = await fetch('', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    action: 'confirm_epub_creation',
+                    metadata: metadata
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                logResult(`SUCCESS: ${data.message}. File: ${data.filename}`);
+                // Close modal and restart appropriate flow
+                hideModal(manualEntryModal, manualEntryModalContent, null);
+                restartScannerAfterDelay(1500);
+            } else {
+                manualEntryStatus.textContent = data.message || 'Failed to generate EPUB. Please try again.';
+            }
+        } catch (error) {
+            console.error('Manual entry error:', error);
+            manualEntryStatus.textContent = 'A network error occurred. Please try again.';
+        } finally {
+            entryGenerateButton.disabled = false;
+            entryGenerateButton.textContent = 'Generate EPUB';
+        }
+    }
+
     // --- Server Communication ---
 
     async function processISBNOnServer(isbn) {
@@ -1807,6 +1953,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               isBarcodeScanFlow = false;
               showManualSearchModal();
           });
+          mainManualEntryButton.addEventListener('click', () => {
+              isBarcodeScanFlow = false;
+              showManualEntryModal();
+          });
           mainScanCoverButton.addEventListener('click', () => {
               isBarcodeScanFlow = false;
               showCoverScanModal();
@@ -1827,9 +1977,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               restartScannerAfterDelay(100);
           });
 
-          manualEntryButton.addEventListener('click', () => {
+          confirmationManualEntryButton.addEventListener('click', () => {
               hideModal(confirmationModal, confirmationModalContent, null);
-              showManualSearchModal(currentMetadata.isbn);
+              showManualEntryModal();
           });
 
           searchAgainButton.addEventListener('click', handleSearchAgain);
@@ -1838,6 +1988,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           manualSearchForm.addEventListener('submit', handleManualSearch);
           manualCancelButton.addEventListener('click', () => {
               hideModal(manualSearchModal, manualSearchModalContent, null);
+              restartScannerAfterDelay(100);
+          });
+
+          // Manual Entry Modal Listeners
+          manualEntryForm.addEventListener('submit', handleManualEntry);
+          entryCancelButton.addEventListener('click', () => {
+              hideModal(manualEntryModal, manualEntryModalContent, null);
               restartScannerAfterDelay(100);
           });
 
