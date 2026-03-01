@@ -1074,9 +1074,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <div class="mt-4">
         <label for="camera-select" class="sr-only">Select Camera</label>
-        <select id="camera-select" 
+        <select id="camera-select"
             class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
         </select>
+        <button id="refresh-cameras-btn"
+            class="mt-2 w-full bg-gray-600 text-white py-2 px-4 rounded-lg hover:bg-gray-700 transition duration-150">
+            Refresh Cameras (for iOS)
+        </button>
     </div>
 
     <div class="mt-8 border-t pt-6">
@@ -1244,6 +1248,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     const resultElement = document.getElementById('result');
     const cameraSelect = document.getElementById('camera-select');
     const scanOverlay = document.getElementById('scan-overlay');
+
+    document.getElementById('refresh-cameras-btn').addEventListener('click', () => {
+      codeReader.getVideoInputDevices().then(devices => {
+        const currentValue = cameraSelect.value;
+        cameraSelect.innerHTML = '';
+        devices.forEach((device, index) => {
+          const option = document.createElement('option');
+          option.value = device.deviceId;
+          option.text = device.label || `Camera ${index + 1}`;
+          cameraSelect.appendChild(option);
+        });
+        if (currentValue && cameraSelect.querySelector(`option[value="${currentValue}"]`)) {
+          cameraSelect.value = currentValue;
+        }
+      }).catch(err => console.error('Camera refresh error:', err));
+    });
 
     // Main control buttons
     const toggleScanButton = document.getElementById('toggle-scan-button');
@@ -1757,16 +1777,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
           let preferredDeviceId = null;
 
-          // **PRIORITY LOGIC: Check for 'back' or 'environment' to select rear camera**
-          const rearCamera = videoInputDevices.find(device => {
-              const label = device.label.toLowerCase();
-              return label.includes('back') || label.includes('environment');
-          });
-
-          if (rearCamera) {
-              preferredDeviceId = rearCamera.deviceId;
-          } else if (videoInputDevices.length > 0) {
-              // Fallback to the first device found
+          // Default to first camera found (user can select others from dropdown)
+          if (videoInputDevices.length > 0) {
               preferredDeviceId = videoInputDevices[0].deviceId;
           }
 
