@@ -1,0 +1,29 @@
+FROM php:8.2-apache
+
+RUN apt-get update && apt-get install -y \
+    libzip-dev libpng-dev libjpeg-dev libfreetype6-dev git \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install zip gd fileinfo \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp
+RUN git clone https://github.com/cjd/make-placeholder-epubs.git
+RUN cp -r /tmp/make-placeholder-epubs/* /var/www/html/
+
+WORKDIR /var/www/html
+
+# Remove complex camera detection logic
+RUN sed -i '1760,1771d' index.php
+RUN sed -i '1759a\          if (videoInputDevices.length > 0) {\n              preferredDeviceId = videoInputDevices[0].deviceId;\n          }' index.php
+
+# Add a "Refresh Cameras" button after the camera select dropdown
+RUN sed -i '1080a\    <button id="refresh-cameras-btn" \n        class="mt-2 w-full bg-gray-600 text-white py-2 px-4 rounded-lg hover:bg-gray-700 transition duration-150">\n        🔄 Refresh Cameras (for iOS)\n    </button>' index.php
+
+# Add JavaScript to handle the refresh button click
+# Insert after the camera select is defined (after line 1245)
+RUN sed -i '1245a\    const refreshCamerasBtn = document.getElementById('\''refresh-cameras-btn'\'');\n    refreshCamerasBtn.addEventListener('\''click'\'', () => {\n      console.log('\''Refreshing camera list...'\'');\n      codeReader.getVideoInputDevices().then(devices => {\n        console.log('\''Found'\'', devices.length, '\''cameras'\'');\n        const currentValue = cameraSelect.value;\n        cameraSelect.innerHTML = '\'''\'';\n        devices.forEach((device, index) => {\n          const option = document.createElement('\''option'\'');\n          option.value = device.deviceId;\n          option.text = device.label || `Camera ${index + 1}`;\n          cameraSelect.appendChild(option);\n        });\n        if (currentValue && cameraSelect.querySelector(`option[value="${currentValue}"]`)) {\n          cameraSelect.value = currentValue;\n        }\n      }).catch(err => console.error('\''Camera refresh error:'\'', err));\n    });' index.php
+
+RUN mkdir -p epubs && touch processed_isbns.txt debug.log
+RUN chown -R www-data:www-data /var/www/html
+
+EXPOSE 80
