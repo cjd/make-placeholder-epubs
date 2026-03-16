@@ -634,7 +634,7 @@ function create_opf_content($metadata, $cover_mime = 'image/jpeg') {
     // HARDCODED COVER FILENAME AND MIME TYPE
     $cover_filename = 'cover.jpeg';
     $cover_mime = 'image/jpeg';
-    $modified_date = substr($metadata['publishedDate'], 0, 10) ?: '2024-01-01';
+    $modified_date = isset($metadata['publishedDate']) ? substr($metadata['publishedDate'], 0, 10) : '2024-01-01';
 
     $title = htmlspecialchars($metadata['title'] ?? 'Unknown Title', ENT_XML1, 'UTF-8');
     $subtitle = isset($metadata['subtitle']) && !empty($metadata['subtitle']) ? htmlspecialchars($metadata['subtitle'], ENT_XML1, 'UTF-8') : '';
